@@ -14,6 +14,7 @@ from . import __version__
 from . import airports as airport_db
 from . import tracker, updater
 from .config import Config
+from .digest import DEFAULT_GROUP_MODE, GROUP_MODES
 from .resolver import resolve_aircraft
 
 log = logging.getLogger(__name__)
@@ -29,6 +30,12 @@ HELP_TEXT = """<b>✈️ Livery Tracker Commands</b>
 /airports — show target airports
 /addairport &lt;code&gt; — add airport by IATA/ICAO code
 /rmairport &lt;code&gt; — remove airport
+
+<b>Digest layout</b>
+/view — how the digest groups flights
+/view type — arrivals vs departures (default)
+/view airport — all traffic per airport
+/view airline — one section per airline
 
 <b>Tracking</b>
 /refresh — re-run today's schedule harvest now
@@ -205,6 +212,41 @@ async def cmd_rmairport(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await update.message.reply_text(f"🗑 Removed {key} from target airports.{note}")
 
 
+async def cmd_view(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Change how the daily digest groups flights, and repaint it immediately."""
+    config = _config(context)
+    current = config.digest_group_by
+    if current not in GROUP_MODES:  # hand-edited config
+        current = DEFAULT_GROUP_MODE
+
+    if not context.args:
+        lines = [f"<b>📐 Digest layout: {current}</b> — {GROUP_MODES[current]}", ""]
+        for mode, description in GROUP_MODES.items():
+            marker = "▸" if mode == current else "  "
+            lines.append(f"{marker} <code>/view {mode}</code> — {description}")
+        await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+        return
+
+    mode = context.args[0].lower()
+    if mode not in GROUP_MODES:
+        await update.message.reply_text(
+            f"Unknown layout '{mode}'. Choose: {', '.join(GROUP_MODES)}."
+        )
+        return
+    if mode == current:
+        await update.message.reply_text(f"Digest is already grouped by {mode}.")
+        return
+
+    config.digest_group_by = mode
+    config.save()
+    await context.application.bot_data["digest"].refresh()
+    await update.message.reply_text(
+        f"✅ Digest now grouped by <b>{mode}</b> — {GROUP_MODES[mode]}.\n"
+        "Check your digest chat, it has been redrawn.",
+        parse_mode=ParseMode.HTML,
+    )
+
+
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     config = _config(context)
     store = context.application.bot_data["store"]
@@ -213,6 +255,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         "<b>📊 Tracker status</b>",
         f"• Watched tails: {len(config.watchlist)}",
         f"• Target airports: {', '.join(sorted(config.target_airports)) or 'none'}",
+        f"• Digest layout: {config.digest_group_by} (/view to change)",
         f"• Active flight legs today: {len(active)}",
     ]
     for ev in active:
@@ -288,6 +331,7 @@ def register_handlers(application: Application, chat_id: int) -> None:
         ("addairport", cmd_addairport),
         ("rmairport", cmd_rmairport),
         ("status", cmd_status),
+        ("view", cmd_view),
         ("refresh", cmd_refresh),
         ("version", cmd_version),
         ("update", cmd_update),

@@ -187,7 +187,8 @@ On first run you'll be asked for:
 | `/rmairport <code>` | Remove a target airport (its legs drop out of the digest) |
 | `/airports` | List target airports |
 | `/refresh` | Re-run today's schedule harvest right now |
-| `/status` | Watchlist size, airports, active flight legs |
+| `/status` | Watchlist size, airports, digest layout, active flight legs |
+| `/view` | Show the digest layout; `/view type\|airport\|airline` changes it |
 | `/version` | Running version + whether a newer release exists |
 | `/update` | Install the latest release now and restart |
 
@@ -226,12 +227,38 @@ Updated 7:57 PM PDT
 | ❌ | Cancelled | The airline cancelled the flight (caught at the T-2h re-check) |
 | ⚠️ | Lost | Never appeared on ADS-B by 30 min past its time (after a delay re-check) |
 
-### Sections
+### Sections — pick your layout with `/view`
+
+The digest can group the day three ways. Whatever you pick sticks (it's saved in
+`config_and_watch.json`) and the digest is redrawn immediately.
+
+**`/view type`** — the default: arrivals and departures.
 
 - **🛬 Arrivals / 🛫 Departures** — legs touching one of your airports.
 - **🔁 Between your airports** — a flight connecting *two* watched airports is shown
   as one merged line, `departure phase → arrival phase` (it's still two
   independently tracked legs under the hood).
+
+**`/view airport`** — one section per airport, showing **all traffic in and out**
+of it in time order. Best when you care about "what's happening at SFO today".
+Two-airport flights deliberately appear under *both* airports here, since they're
+a real departure at one end and a real arrival at the other.
+
+```
+🛬🛫 SFO — San Francisco
+✅ N8658A — DEN➔SFO WN4670, landed 8:03 PM PDT
+🟡 N642FR "Hugh the Manatee" — SFO➔SJC F9100, ETD 11:43 PM PDT
+🚨 N265AK "Xáat Kwáani" — SEA➔SFO AS1234, 12,400 ft · 310 kts · 48 NM out
+```
+
+**`/view airline`** — one section per airline (resolved automatically when you
+`/add` a tail), each in time order. Best for fleet-watching a single carrier.
+
+```
+🏢 Alaska Airlines
+🚨 N265AK "Xáat Kwáani" — SEA➔SFO AS1234 @ SFO, 12,400 ft · 310 kts · 48 NM out
+🟡 N596AS "Tiana's Bayou Adventure" — SJC➔SEA AS1311 @ SJC, ETD Mon 1:03 AM PDT
+```
 
 ### Notes you may see on a leg
 
@@ -246,7 +273,7 @@ Updated 7:57 PM PDT
 
 | File | What it holds |
 |---|---|
-| `config_and_watch.json` | Target airports + watched aircraft |
+| `config_and_watch.json` | Target airports, watched aircraft, digest layout |
 | `flights_today.json` | Today's tracked legs and their states (crash recovery) |
 | `digest_state.json` | Today's digest message id (for in-place edits) |
 | `schedule_cache.json` | Cached schedule per tail (12h outage buffer) |

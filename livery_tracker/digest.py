@@ -74,12 +74,14 @@ def _leg_detail(event: FlightEvent) -> str:
     return detail
 
 
-def _leg_line(event: FlightEvent) -> str:
+def _leg_line(event: FlightEvent, show_airport: bool = True) -> str:
+    """One leg. `show_airport` is off when the section header already names it."""
     livery = f' "{event.livery}"' if event.livery else ""
     flight = f" {event.flight_number}" if event.flight_number else ""
     route = f"{event.route_origin}➔{event.route_destination}{flight}"
     emoji = STATE_EMOJI.get(event.status, "•")
-    return f"{emoji} <b>{event.tail}</b>{livery} — {route} @ {event.target_airport}, {_leg_detail(event)}"
+    where = f" @ {event.target_airport}" if show_airport else ""
+    return f"{emoji} <b>{event.tail}</b>{livery} — {route}{where}, {_leg_detail(event)}"
 
 
 def _merged_line(dep: FlightEvent, arr: FlightEvent) -> str:
@@ -123,10 +125,92 @@ def _pair_legs(
     return pairs, solo_arrivals, solo_departures
 
 
+# ---------------------------------------------------------------------------
+# Grouping modes — how the digest sections the day's flights (/view)
+# ---------------------------------------------------------------------------
+
+GROUP_MODES = {
+    "type": "arrivals vs departures",
+    "airport": "all traffic per airport",
+    "airline": "one section per airline",
+}
+DEFAULT_GROUP_MODE = "type"
+
+Section = tuple[str, list[str]]
+
+
+def _airline_of(event: FlightEvent, config: Config) -> str:
+    """Airline for a tail, from the metadata /add resolved into the watchlist."""
+    return (config.watchlist.get(event.tail) or {}).get("airline") or "Unknown airline"
+
+
+def _sections_by_type(events: list[FlightEvent], config: Config) -> list[Section]:
+    """Default: arrivals and departures, with two-airport flights merged."""
+    pairs, arrivals, departures = _pair_legs(events)
+    sections: list[Section] = []
+    if pairs:
+        sections.append(
+            ("🔁 <b>Between your airports</b>", [_merged_line(d, a) for d, a in pairs])
+        )
+    if arrivals:
+        sections.append(("🛬 <b>Arrivals</b>", [_leg_line(e) for e in arrivals]))
+    if departures:
+        sections.append(("🛫 <b>Departures</b>", [_leg_line(e) for e in departures]))
+    return sections
+
+
+def _sections_by_airport(events: list[FlightEvent], config: Config) -> list[Section]:
+    """All traffic in and out of each airport, in time order.
+
+    Legs are deliberately not merged here: a flight between two watched
+    airports is a real departure at one and a real arrival at the other, so
+    it belongs under both headings.
+    """
+    buckets: dict[str, list[FlightEvent]] = {}
+    for event in events:
+        buckets.setdefault(event.target_airport, []).append(event)
+
+    sections: list[Section] = []
+    for code in sorted(buckets):
+        name = (config.target_airports.get(code) or {}).get("name", "")
+        title = f"🛬🛫 <b>{code}</b>" + (f" — {name}" if name else "")
+        legs = sorted(buckets[code], key=lambda e: e.scheduled_time)
+        sections.append((title, [_leg_line(e, show_airport=False) for e in legs]))
+    return sections
+
+
+def _sections_by_airline(events: list[FlightEvent], config: Config) -> list[Section]:
+    """One section per airline, each in time order."""
+    pairs, arrivals, departures = _pair_legs(events)
+    buckets: dict[str, list[tuple[datetime, str]]] = {}
+
+    def add(event: FlightEvent, line: str) -> None:
+        buckets.setdefault(_airline_of(event, config), []).append(
+            (event.scheduled_time, line)
+        )
+
+    for dep, arr in pairs:
+        add(dep, _merged_line(dep, arr))
+    for event in arrivals + departures:
+        add(event, _leg_line(event))
+
+    sections: list[Section] = []
+    for airline in sorted(buckets):
+        lines = [line for _, line in sorted(buckets[airline], key=lambda item: item[0])]
+        sections.append((f"🏢 <b>{airline}</b>", lines))
+    return sections
+
+
+_SECTION_BUILDERS = {
+    "type": _sections_by_type,
+    "airport": _sections_by_airport,
+    "airline": _sections_by_airline,
+}
+
+
 def render_digest(store: FlightStore, config: Config, now: datetime | None = None) -> str:
     now = now or datetime.now().astimezone()
     events = sorted(store.events.values(), key=lambda e: e.scheduled_time)
-    pairs, arrivals, departures = _pair_legs(events)
 
     airports = ", ".join(sorted(config.target_airports)) or "no airports configured"
     lines = [
@@ -137,17 +221,10 @@ def render_digest(store: FlightStore, config: Config, now: datetime | None = Non
     if not events:
         lines.append("No watched aircraft scheduled at your target airports today.")
     else:
-        if pairs:
-            lines.append("🔁 <b>Between your airports</b>")
-            lines.extend(_merged_line(dep, arr) for dep, arr in pairs)
-            lines.append("")
-        if arrivals:
-            lines.append("🛬 <b>Arrivals</b>")
-            lines.extend(_leg_line(e) for e in arrivals)
-            lines.append("")
-        if departures:
-            lines.append("🛫 <b>Departures</b>")
-            lines.extend(_leg_line(e) for e in departures)
+        builder = _SECTION_BUILDERS.get(config.digest_group_by, _sections_by_type)
+        for title, section_lines in builder(events, config):
+            lines.append(title)
+            lines.extend(section_lines)
             lines.append("")
     lines.append(f"<i>Updated {fmt_local(now)}</i>")
     return "\n".join(lines)

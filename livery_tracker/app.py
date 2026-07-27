@@ -25,6 +25,7 @@ BOT_COMMANDS = [
     BotCommand("addairport", "Add a target airport"),
     BotCommand("rmairport", "Remove a target airport"),
     BotCommand("status", "Tracker status"),
+    BotCommand("view", "Change how the digest is grouped"),
     BotCommand("refresh", "Run schedule harvest now"),
     BotCommand("version", "Version + update check"),
     BotCommand("update", "Install the latest release"),

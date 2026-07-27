@@ -102,6 +102,7 @@ class Config:
 
     target_airports: dict[str, dict[str, Any]] = field(default_factory=dict)
     watchlist: dict[str, dict[str, Any]] = field(default_factory=dict)
+    digest_group_by: str = "type"  # how the digest sections flights: type|airport|airline
 
     @classmethod
     def load(cls) -> "Config":
@@ -112,12 +113,17 @@ class Config:
         return cls(
             target_airports=raw.get("target_airports", {}),
             watchlist=raw.get("watchlist", {}),
+            digest_group_by=raw.get("digest_group_by", "type"),
         )
 
     def save(self) -> None:
         atomic_write_json(
             config_file(),
-            {"target_airports": self.target_airports, "watchlist": self.watchlist},
+            {
+                "target_airports": self.target_airports,
+                "watchlist": self.watchlist,
+                "digest_group_by": self.digest_group_by,
+            },
         )
 
     # -- helpers -----------------------------------------------------------
