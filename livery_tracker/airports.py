@@ -36,6 +36,7 @@ class Airport:
     name: str
     lat: float
     lon: float
+    rank: int = 0  # size score from _TYPE_RANK (+1 for scheduled service)
 
 
 _index: dict[str, Airport] | None = None
@@ -91,8 +92,10 @@ def _build_index() -> dict[str, Airport]:
             continue
         icao = (row.get("icao_code") or row.get("ident") or "").strip().upper()
         iata = (row.get("iata_code") or "").strip().upper()
-        airport = Airport(icao=icao, iata=iata, name=row.get("name", "").strip(), lat=lat, lon=lon)
         r = _TYPE_RANK.get(row.get("type", ""), 0) + (1 if row.get("scheduled_service") == "yes" else 0)
+        airport = Airport(
+            icao=icao, iata=iata, name=row.get("name", "").strip(), lat=lat, lon=lon, rank=r
+        )
         for code in {icao, iata, (row.get("ident") or "").strip().upper()} - {""}:
             if r >= rank.get(code, -99):
                 rank[code] = r
@@ -106,3 +109,29 @@ def lookup(code: str) -> Airport | None:
     if _index is None:
         _index = _build_index()
     return _index.get(code.strip().upper())
+
+
+def nearest(lat: float, lon: float, min_rank: int = 3) -> Airport | None:
+    """Closest airport to a position (default: medium-size or better).
+
+    Used to name a diversion airport, so small strips and heliports are
+    excluded by rank to avoid mislabeling.
+    """
+    from .geo import haversine_nm
+
+    global _index
+    if _index is None:
+        _index = _build_index()
+    best: Airport | None = None
+    best_dist = float("inf")
+    seen: set[int] = set()
+    for airport in _index.values():
+        if id(airport) in seen:
+            continue
+        seen.add(id(airport))
+        if airport.rank < min_rank:
+            continue
+        dist = haversine_nm(lat, lon, airport.lat, airport.lon)
+        if dist < best_dist:
+            best, best_dist = airport, dist
+    return best

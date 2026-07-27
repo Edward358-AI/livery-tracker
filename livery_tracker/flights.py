@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-from .config import atomic_write_json, flights_file
+from .config import atomic_write_json, data_dir, flights_file
 
 
 class EventType(str, Enum):
@@ -22,13 +22,18 @@ class EventState(str, Enum):
     LIVE = "LIVE"                  # polling ADS-B every 120s
     LANDED = "LANDED"
     DEPARTED = "DEPARTED"
+    DIVERTED = "DIVERTED"          # confirmed on the ground far from the target
     CANCELLED = "CANCELLED"        # source reported the flight cancelled
     LOST = "LOST"                  # no ADS-B data past deadline
 
     @property
     def terminal(self) -> bool:
         return self in (
-            EventState.LANDED, EventState.DEPARTED, EventState.CANCELLED, EventState.LOST
+            EventState.LANDED,
+            EventState.DEPARTED,
+            EventState.DIVERTED,
+            EventState.CANCELLED,
+            EventState.LOST,
         )
 
 
@@ -94,6 +99,18 @@ class FlightEvent:
                 {"lat": None, "lon": None, "alt": None, "gs": None, "dist_nm": None},
             ),
         )
+
+
+def append_history(event: FlightEvent) -> None:
+    """Log a concluded leg to data/history.jsonl for accuracy auditing.
+
+    Every terminal decision (landed, presumed landed, diverted, lost, ...)
+    lands here with its final telemetry, so inference thresholds can be
+    checked against what actually happened and tuned over time.
+    """
+    entry = {"finalized_at": datetime.now(timezone.utc).isoformat(), **event.to_dict()}
+    with (data_dir() / "history.jsonl").open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
 class FlightStore:

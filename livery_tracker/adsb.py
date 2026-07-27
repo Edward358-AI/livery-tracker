@@ -14,6 +14,8 @@ SOURCES = [
     "https://api.adsb.lol/v2/registration/{reg}",
 ]
 
+ADSBDB_CALLSIGN_URL = "https://api.adsbdb.com/v0/callsign/{callsign}"
+
 
 @dataclass
 class Telemetry:
@@ -25,6 +27,25 @@ class Telemetry:
     baro_rate: float | None  # ft/min, negative = descending
     callsign: str
     source: str
+
+
+def resolve_callsign_route(callsign: str) -> tuple[str, str, str] | None:
+    """(origin, destination, iata_flight_no) for a live callsign, via adsbdb.com.
+
+    adsbdb returns the string "unknown callsign" instead of an object when it
+    has no route on file, so guard the shape carefully.
+    """
+    body = get_json(ADSBDB_CALLSIGN_URL.format(callsign=callsign.strip()))
+    response = (body or {}).get("response")
+    if not isinstance(response, dict):
+        return None
+    route = response.get("flightroute") or {}
+    origin = ((route.get("origin") or {}).get("iata_code") or "").upper()
+    dest = ((route.get("destination") or {}).get("iata_code") or "").upper()
+    if not origin or not dest:
+        return None
+    flight_no = (route.get("callsign_iata") or callsign).strip()
+    return origin, dest, flight_no
 
 
 def fetch_telemetry(reg: str) -> Telemetry | None:

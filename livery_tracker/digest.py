@@ -25,6 +25,7 @@ STATE_EMOJI = {
     EventState.LIVE: "🚨",
     EventState.LANDED: "✅",
     EventState.DEPARTED: "🛫",
+    EventState.DIVERTED: "↪️",
     EventState.CANCELLED: "❌",
     EventState.LOST: "⚠️",
 }
@@ -56,6 +57,8 @@ def _leg_detail(event: FlightEvent) -> str:
         return f"landed {event.status_note}".strip()
     if event.status == EventState.DEPARTED:
         return f"departed {event.status_note}".strip()
+    if event.status == EventState.DIVERTED:
+        return f"diverted — {event.status_note}" if event.status_note else "diverted"
     if event.status == EventState.CANCELLED:
         return "cancelled"
     if event.status == EventState.LOST:

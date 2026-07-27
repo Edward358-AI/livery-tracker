@@ -53,6 +53,7 @@ def build_application(creds: Credentials) -> Application:
     store = FlightStore()
     application.bot_data["config"] = config
     application.bot_data["store"] = store
+    application.bot_data["chat_id"] = creds.chat_id
 
     application.bot_data["digest"] = DigestManager(
         Bot(creds.digest_bot_token), creds.chat_id, store, config, owns_bot=True

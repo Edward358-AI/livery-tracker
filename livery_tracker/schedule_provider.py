@@ -40,8 +40,12 @@ def polite_delay() -> None:
     time.sleep(3 + random.uniform(0, 2))
 
 
-def fetch_flight_list(reg: str) -> list[dict[str, Any]]:
-    """Raw FR24 schedule rows for a registration (newest first). [] on failure."""
+def fetch_flight_list(reg: str) -> list[dict[str, Any]] | None:
+    """Raw FR24 schedule rows for a registration (newest first).
+
+    Returns [] when FR24 answered but has nothing, None when every attempt
+    failed — callers use that distinction to fall back / raise the alarm.
+    """
     last_error: str = ""
     for profile in IMPERSONATE_PROFILES:
         try:
@@ -53,14 +57,56 @@ def fetch_flight_list(reg: str) -> list[dict[str, Any]]:
             )
             if resp.status_code == 200:
                 payload = resp.json()
-                data = (((payload.get("result") or {}).get("response") or {}).get("data")) or []
-                return data
+                return (((payload.get("result") or {}).get("response") or {}).get("data")) or []
             last_error = f"HTTP {resp.status_code}"
         except Exception as exc:  # noqa: BLE001
             last_error = repr(exc)
         time.sleep(1 + random.uniform(0, 2))
     log.warning("FR24 flight list failed for %s (%s)", reg, last_error)
-    return []
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Last-good-schedule cache (rides out intra-day FR24 outages)
+# ---------------------------------------------------------------------------
+
+CACHE_MAX_AGE = timedelta(hours=12)
+
+
+def _schedule_cache_path():
+    from .config import data_dir
+
+    return data_dir() / "schedule_cache.json"
+
+
+def cache_rows(reg: str, rows: list[dict[str, Any]]) -> None:
+    from .config import atomic_write_json
+
+    path = _schedule_cache_path()
+    cache: dict[str, Any] = {}
+    if path.exists():
+        try:
+            cache = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            cache = {}
+    cache[reg] = {"fetched_at": datetime.now(timezone.utc).isoformat(), "rows": rows}
+    atomic_write_json(path, cache)
+
+
+def load_cached_rows(reg: str) -> list[dict[str, Any]] | None:
+    path = _schedule_cache_path()
+    if not path.exists():
+        return None
+    try:
+        entry = json.loads(path.read_text(encoding="utf-8")).get(reg)
+    except json.JSONDecodeError:
+        return None
+    if not entry:
+        return None
+    fetched_at = datetime.fromisoformat(entry["fetched_at"])
+    if datetime.now(timezone.utc) - fetched_at > CACHE_MAX_AGE:
+        return None
+    return entry["rows"]
 
 
 def extract_aircraft_meta(rows: list[dict[str, Any]]) -> dict[str, str]:
@@ -162,7 +208,7 @@ class LegRefresh:
 
 def refresh_leg_time(reg: str, event: FlightEvent) -> LegRefresh:
     """T-2h re-scrape: current best ETA/ETD (and cancellation flag) for a leg."""
-    rows = fetch_flight_list(reg)
+    rows = fetch_flight_list(reg) or []
     key = "arrival" if event.type == EventType.ARRIVAL else "departure"
     best: tuple[float, datetime, dict[str, Any]] | None = None
     for row in rows:
@@ -255,9 +301,22 @@ def fetch_flightaware_events(
         return []
 
 
-def harvest_tail(reg: str, livery: str, config: Config) -> list[FlightEvent]:
-    """All watched-airport legs for one tail: FR24 first, FlightAware fallback."""
+def harvest_tail(reg: str, livery: str, config: Config) -> tuple[list[FlightEvent], bool]:
+    """All watched-airport legs for one tail, plus whether any source answered.
+
+    Order: FR24 live -> today's cached FR24 rows -> FlightAware scrape.
+    (events, False) means every source failed — the caller should treat the
+    tail as unknown, not as "no flights today".
+    """
     rows = fetch_flight_list(reg)
-    if rows:
-        return rows_to_events(reg, livery, rows, config)
-    return fetch_flightaware_events(reg, livery, config)
+    if rows is not None:
+        cache_rows(reg, rows)
+        return rows_to_events(reg, livery, rows, config), True
+    cached = load_cached_rows(reg)
+    if cached is not None:
+        log.info("FR24 unreachable — using cached schedule for %s", reg)
+        return rows_to_events(reg, livery, cached, config), True
+    events = fetch_flightaware_events(reg, livery, config)
+    if events:
+        return events, True
+    return [], False

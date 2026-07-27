@@ -19,11 +19,12 @@ from typing import Callable
 
 from telegram.ext import Application, ContextTypes
 
+from . import airports as airport_db
 from . import schedule_provider
-from .adsb import fetch_telemetry
+from .adsb import Telemetry, fetch_telemetry, resolve_callsign_route
 from .config import Config
 from .digest import DigestManager, fmt_local
-from .flights import EventState, EventType, FlightEvent, FlightStore
+from .flights import EventState, EventType, FlightEvent, FlightStore, append_history
 from .geo import haversine_nm
 
 log = logging.getLogger(__name__)
@@ -46,6 +47,14 @@ SILENT_GRACE = timedelta(minutes=6)          # ~3 missed polls
 APPROACH_MAX_ALT_FT = 4_000
 APPROACH_MAX_DIST_NM = 15.0
 LIVE_MAX_OVERRUN = timedelta(hours=3)        # hard cap: give up this long past schedule
+
+# Diversion: only conclude on CONFIRMED ground contact far from the target,
+# seen on consecutive polls (debounce against bad/one-off samples).
+DIVERT_MIN_DIST_NM = 30.0
+DIVERT_CONFIRM_POLLS = 2
+
+# Schedule-less ADS-B watch mode (activates only when schedule sources fail).
+WATCH_INTERVAL = 900  # seconds between watch sweeps
 
 
 def _now() -> datetime:
@@ -98,6 +107,7 @@ async def job_refresh(context: ContextTypes.DEFAULT_TYPE) -> None:
     if result.cancelled:
         event.status = EventState.CANCELLED
         store.upsert(event)
+        append_history(event)
         await _digest(application).refresh()
         log.info("Flight cancelled: %s", event.id)
         return
@@ -144,6 +154,7 @@ async def job_poll(context: ContextTypes.DEFAULT_TYPE) -> None:
         if outcome is not None:
             event.status, event.status_note = outcome
             store.upsert(event)
+            append_history(event)
             await _digest(application).refresh()
             context.job.schedule_removal()
             log.info("Leg %s concluded without signal: %s", event.id, event.status.value)
@@ -152,6 +163,13 @@ async def job_poll(context: ContextTypes.DEFAULT_TYPE) -> None:
     dist_nm = None
     if airport.get("lat") is not None:
         dist_nm = haversine_nm(telemetry.lat, telemetry.lon, airport["lat"], airport["lon"])
+    prev_divert_hits = event.last_telemetry.get("divert_hits") or 0
+    divert_candidate = (
+        event.type == EventType.ARRIVAL
+        and telemetry.on_ground
+        and dist_nm is not None
+        and dist_nm >= DIVERT_MIN_DIST_NM
+    )
     event.last_telemetry = {
         "lat": telemetry.lat,
         "lon": telemetry.lon,
@@ -160,6 +178,7 @@ async def job_poll(context: ContextTypes.DEFAULT_TYPE) -> None:
         "dist_nm": dist_nm,
         "on_ground": telemetry.on_ground,
         "seen_at": now.isoformat(),
+        "divert_hits": prev_divert_hits + 1 if divert_candidate else 0,
     }
 
     finished = False
@@ -170,6 +189,14 @@ async def job_poll(context: ContextTypes.DEFAULT_TYPE) -> None:
         if near and low:
             event.status = EventState.LANDED
             event.status_note = stamp
+            finished = True
+        elif divert_candidate and prev_divert_hits + 1 >= DIVERT_CONFIRM_POLLS:
+            where = await asyncio.to_thread(airport_db.nearest, telemetry.lat, telemetry.lon)
+            place = f" near {where.iata or where.icao}" if where else ""
+            event.status = EventState.DIVERTED
+            event.status_note = (
+                f"on ground{place}, {dist_nm:.0f} NM from {event.target_airport} (~{stamp})"
+            )
             finished = True
     else:
         airborne = not telemetry.on_ground
@@ -187,6 +214,8 @@ async def job_poll(context: ContextTypes.DEFAULT_TYPE) -> None:
         finished = True
 
     store.upsert(event)
+    if finished:
+        append_history(event)
     await _digest(application).refresh()
     if finished:
         context.job.schedule_removal()
@@ -249,14 +278,19 @@ def _register_new_events(application: Application, events: list[FlightEvent]) ->
     return new_count
 
 
-async def harvest_single(application: Application, tail: str) -> int:
-    """Targeted harvest for one tail (used right after /add). Refreshes the digest."""
+async def harvest_single(application: Application, tail: str) -> tuple[int, bool]:
+    """Targeted harvest for one tail (used right after /add). Refreshes the digest.
+
+    Returns (new_leg_count, sources_ok); on source failure, watch mode is armed.
+    """
     config: Config = application.bot_data["config"]
     livery = (config.watchlist.get(tail) or {}).get("livery", "")
-    events = await asyncio.to_thread(schedule_provider.harvest_tail, tail, livery, config)
+    events, ok = await asyncio.to_thread(schedule_provider.harvest_tail, tail, livery, config)
     new_count = _register_new_events(application, events)
+    if not ok:
+        enable_watch_mode(application)
     await _digest(application).refresh()
-    return new_count
+    return new_count, ok
 
 
 async def run_harvest(application: Application) -> int:
@@ -269,21 +303,41 @@ async def run_harvest(application: Application) -> int:
     for event in store.remove_where(lambda ev: ev.scheduled_time < cutoff):
         _cancel_jobs(application, event.id)
 
+    disable_watch_mode(application)  # re-armed below only if sources fail again
     new_events = 0
+    failed_tails: list[str] = []
     if config.watchlist and config.target_airports:
         tails = list(config.watchlist.items())
         for i, (tail, meta) in enumerate(tails):
-            events = await asyncio.to_thread(
+            events, ok = await asyncio.to_thread(
                 schedule_provider.harvest_tail, tail, meta.get("livery", ""), config
             )
+            if not ok:
+                failed_tails.append(tail)
             new_events += _register_new_events(application, events)
             if i < len(tails) - 1:
                 await asyncio.to_thread(schedule_provider.polite_delay)
     else:
         log.info("Harvest ran with empty watchlist or no target airports")
 
+    if failed_tails:
+        newly_armed = enable_watch_mode(application)
+        chat_id = application.bot_data.get("chat_id")
+        if newly_armed and chat_id:
+            try:
+                await application.bot.send_message(
+                    chat_id,
+                    "⚠️ Schedule sources unreachable for: "
+                    + ", ".join(failed_tails)
+                    + ".\nADS-B watch mode is active — I'll pick these tails up "
+                    "from live traffic if they fly to/from your airports.",
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning("Failed to send source-failure alert: %s", exc)
+
     await _digest(application).refresh()
-    log.info("Harvest complete: %d new leg(s)", new_events)
+    log.info("Harvest complete: %d new leg(s), %d source failure(s)",
+             new_events, len(failed_tails))
     return new_events
 
 
@@ -302,6 +356,129 @@ async def purge_events(
 
 async def job_daily_harvest(context: ContextTypes.DEFAULT_TYPE) -> None:
     await run_harvest(context.application)
+
+
+# ---------------------------------------------------------------------------
+# Schedule-less ADS-B watch mode (last-resort fallback)
+#
+# When every schedule source fails, we can still catch flights: poll the
+# watched tails' live positions every 15 minutes; when one is airborne,
+# resolve its route from the callsign (adsbdb.com) and synthesize legs on
+# the spot if the route touches a watched airport.
+# ---------------------------------------------------------------------------
+
+def enable_watch_mode(application: Application) -> bool:
+    """Arm the watch sweep; returns True if it wasn't already running."""
+    jq = application.job_queue
+    if jq.get_jobs_by_name("adsb_watch"):
+        return False
+    jq.run_repeating(job_adsb_watch, interval=WATCH_INTERVAL, first=30, name="adsb_watch")
+    log.info("ADS-B watch mode armed (every %ds)", WATCH_INTERVAL)
+    return True
+
+
+def disable_watch_mode(application: Application) -> None:
+    for job in application.job_queue.get_jobs_by_name("adsb_watch"):
+        job.schedule_removal()
+
+
+def synthesize_watch_events(
+    tail: str,
+    livery: str,
+    telemetry: Telemetry,
+    origin: str,
+    dest: str,
+    flight_no: str,
+    config: Config,
+    now: datetime,
+) -> list[FlightEvent]:
+    """Build legs for an airborne aircraft found without a schedule.
+
+    The arrival ETA is estimated from current distance and ground speed; the
+    id embeds callsign+date so repeated watch sweeps never duplicate a leg.
+    """
+    events: list[FlightEvent] = []
+    date_tag = now.strftime("%Y%m%d")
+
+    match = config.airport_for_code(dest)
+    if match:
+        iata, info = match
+        dist = haversine_nm(telemetry.lat, telemetry.lon, info["lat"], info["lon"])
+        speed = telemetry.gs_kts if telemetry.gs_kts and telemetry.gs_kts > 100 else 400.0
+        eta = now + timedelta(hours=dist / speed)
+        ev = FlightEvent(
+            id=f"{tail}-ARR-{flight_no}-{date_tag}-{iata}",
+            tail=tail,
+            livery=livery,
+            type=EventType.ARRIVAL,
+            target_airport=iata,
+            scheduled_time=eta,
+            route_origin=origin,
+            route_destination=dest,
+            flight_number=flight_no,
+            status=EventState.LIVE,
+        )
+        ev.status_note = "found via ADS-B watch"
+        events.append(ev)
+
+    match = config.airport_for_code(origin)
+    if match:
+        iata, info = match
+        dist = haversine_nm(telemetry.lat, telemetry.lon, info["lat"], info["lon"])
+        ev = FlightEvent(
+            id=f"{tail}-DEP-{flight_no}-{date_tag}-{iata}",
+            tail=tail,
+            livery=livery,
+            type=EventType.DEPARTURE,
+            target_airport=iata,
+            scheduled_time=now,
+            route_origin=origin,
+            route_destination=dest,
+            flight_number=flight_no,
+        )
+        if telemetry.alt_ft >= DEPARTED_MIN_ALT_FT or dist >= DEPARTED_MIN_DIST_NM:
+            ev.status = EventState.DEPARTED
+            ev.status_note = f"~{fmt_local(now)} (detected via ADS-B watch)"
+        else:
+            ev.status = EventState.LIVE
+            ev.status_note = "found via ADS-B watch"
+        events.append(ev)
+
+    return events
+
+
+async def job_adsb_watch(context: ContextTypes.DEFAULT_TYPE) -> None:
+    application = context.application
+    store: FlightStore = application.bot_data["store"]
+    config: Config = application.bot_data["config"]
+    now = _now()
+    created = 0
+
+    for tail, meta in config.watchlist.items():
+        telemetry = await asyncio.to_thread(fetch_telemetry, tail)
+        await asyncio.sleep(1.5)  # stay polite to the community APIs
+        if telemetry is None or telemetry.on_ground or not telemetry.callsign:
+            continue
+        route = await asyncio.to_thread(resolve_callsign_route, telemetry.callsign)
+        if route is None:
+            continue
+        origin, dest, flight_no = route
+        events = synthesize_watch_events(
+            tail, meta.get("livery", ""), telemetry, origin, dest, flight_no, config, now
+        )
+        for event in events:
+            if store.get(event.id) is not None:
+                continue
+            store.upsert(event)
+            if event.status.terminal:
+                append_history(event)
+            else:
+                schedule_event_jobs(application, event)
+            created += 1
+
+    if created:
+        await _digest(application).refresh()
+        log.info("ADS-B watch created %d leg(s)", created)
 
 
 # ---------------------------------------------------------------------------

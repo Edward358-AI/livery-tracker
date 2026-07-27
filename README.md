@@ -113,14 +113,26 @@ On first run you'll be asked for:
 | `HARVEST_TIME` | `06:00` | Local time of the daily schedule harvest |
 | `LT_DATA_DIR` | `./data` | Where runtime state lives |
 
-## Notes on data sources
+## Notes on data sources & resilience
 
 - Schedule harvesting impersonates a real Chrome TLS fingerprint (`curl_cffi`) and
   spaces lookups ~3s apart to be polite to the free endpoints.
-- If an aircraft's transponder goes dark, the leg is marked ⚠️ *Tracking Lost* 30
-  minutes past its scheduled time instead of polling forever.
 - Live polling only runs in a short window around each flight (T-45m for arrivals,
   T-15m for departures), once every 120 seconds.
+- **Cancellations** are detected at the T-2h schedule re-check (❌ in the digest).
+- **Diversions**: an arrival confirmed on the ground 30+ NM from your airport on two
+  consecutive polls is marked ↪️ *diverted*, with the nearest sizeable airport named.
+- **Signal loss**: ADS-B coverage is patchy near the ground, so a plane last seen low
+  and close that goes dark is concluded ✅ *landed (signal lost on approach)*; one
+  that never shows up at all is ⚠️ *lost* 30 min past schedule, and every live leg
+  has a 3-hour hard stop.
+- **Source outages**: schedules are cached for 12h to ride out intra-day FR24
+  failures. If every schedule source fails, you get a warning from the command bot
+  and **ADS-B watch mode** takes over — the tracker polls your tails' live positions
+  every 15 minutes, resolves routes from callsigns via the free adsbdb.com API, and
+  synthesizes legs on the fly for anything touching your airports.
+- Every concluded leg is appended to `data/history.jsonl` with its final telemetry,
+  so you can audit the inference decisions against reality and tune thresholds.
 
 ## License
 

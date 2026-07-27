@@ -83,6 +83,16 @@ def test_render_cancelled_state():
     assert "❌" in text and "cancelled" in text
 
 
+def test_render_diverted_state():
+    store = FlightStore()
+    ev = make_event("x", EventType.ARRIVAL, EventState.DIVERTED)
+    ev.status_note = "on ground near SMF, 75 NM from SFO (~4:10 PM PDT)"
+    store.upsert(ev)
+    text = render_digest(store, make_config())
+    assert "↪️" in text
+    assert "diverted — on ground near SMF" in text
+
+
 def test_flight_between_two_watched_airports_renders_as_one_line():
     dep_time = datetime(2026, 7, 26, 16, 0, tzinfo=timezone.utc)
     arr_time = datetime(2026, 7, 26, 17, 30, tzinfo=timezone.utc)

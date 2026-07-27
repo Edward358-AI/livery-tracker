@@ -46,12 +46,17 @@ async def _background_harvest(application, chat_id: int, tail: str | None = None
     """Run a harvest off the handler path and report back when done."""
     try:
         if tail:
-            count = await tracker.harvest_single(application, tail)
+            count, sources_ok = await tracker.harvest_single(application, tail)
         else:
             count = await tracker.run_harvest(application)
-        await application.bot.send_message(
-            chat_id, f"📋 Digest updated — {count} new flight leg(s) found."
-        )
+            sources_ok = True  # run_harvest sends its own source-failure alert
+        message = f"📋 Digest updated — {count} new flight leg(s) found."
+        if not sources_ok:
+            message += (
+                "\n⚠️ Schedule sources were unreachable — ADS-B watch mode is active "
+                "and will pick this tail up from live traffic."
+            )
+        await application.bot.send_message(chat_id, message)
     except Exception:  # noqa: BLE001
         log.exception("Background harvest failed")
         try:

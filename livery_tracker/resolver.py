@@ -36,7 +36,7 @@ def resolve_aircraft(reg: str) -> dict[str, Any]:
         info["thumbnail"] = ((photo.get("thumbnail_large") or {}).get("src")) or ""
         info["photo_link"] = photo.get("link") or ""
 
-    rows = fetch_flight_list(reg)
+    rows = fetch_flight_list(reg) or []
     meta = extract_aircraft_meta(rows)
     if meta["airline"]:
         info["airline"] = meta["airline"]
