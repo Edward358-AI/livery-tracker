@@ -29,7 +29,7 @@ from [OurAirports](https://ourairports.com).
 5. **Crash-safe** — all state lives in `data/*.json`; on restart the tracker resumes
    every pending flight exactly where it left off.
 
-## What you need before you start
+## System Prequisites
 
 ### Everyone
 
