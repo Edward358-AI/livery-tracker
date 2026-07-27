@@ -1,0 +1,298 @@
+{
+ "result": {
+  "response": {
+   "data": [
+    {
+     "identification": {
+      "id": null,
+      "row": 5843048335,
+      "number": {
+       "default": "AS474",
+       "alternative": null
+      },
+      "callsign": null,
+      "codeshare": null
+     },
+     "status": {
+      "live": false,
+      "text": "Estimated dep 19:08",
+      "icon": "green",
+      "estimated": null,
+      "ambiguous": false,
+      "generic": {
+       "status": {
+        "text": "estimated",
+        "type": "departure",
+        "color": "green",
+        "diverted": null
+       },
+       "eventTime": {
+        "utc": 1785366480,
+        "local": 1785352080
+       }
+      }
+     },
+     "aircraft": {
+      "model": {
+       "code": "B739",
+       "text": "Boeing 737-990(ER)"
+      },
+      "registration": "N265AK",
+      "country": {
+       "id": 236,
+       "name": "United States",
+       "alpha2": "US",
+       "alpha3": "USA"
+      },
+      "hex": "A2919A",
+      "restricted": false,
+      "serialNo": null,
+      "age": {
+       "availability": true
+      },
+      "availability": {
+       "serialNo": true,
+       "age": true
+      }
+     },
+     "owner": {
+      "name": "Alaska Airlines",
+      "code": {
+       "iata": "AS",
+       "icao": "ASA"
+      }
+     },
+     "airline": {
+      "name": "Alaska Airlines (Honoring Those Who Serve Livery)",
+      "code": {
+       "iata": "AS",
+       "icao": "ASA"
+      },
+      "short": "Alaska Airlines"
+     },
+     "airport": {
+      "origin": {
+       "name": "Raleigh-Durham International Airport",
+       "code": {
+        "iata": "RDU",
+        "icao": "KRDU"
+       },
+       "position": {
+        "latitude": 35.877628,
+        "longitude": -78.787399,
+        "country": {
+         "name": "United States",
+         "code": "US",
+         "id": 236
+        },
+        "region": {
+         "city": "Raleigh-Durham"
+        }
+       },
+       "timezone": {
+        "name": "America/New_York",
+        "offset": -14400,
+        "abbr": "EDT",
+        "abbrName": "Eastern Daylight Time",
+        "isDst": true
+       },
+       "visible": true
+      },
+      "destination": {
+       "name": "San Diego International Airport",
+       "code": {
+        "iata": "SAN",
+        "icao": "KSAN"
+       },
+       "position": {
+        "latitude": 32.733551,
+        "longitude": -117.189003,
+        "country": {
+         "name": "United States",
+         "code": "US",
+         "id": 236
+        },
+        "region": {
+         "city": "San Diego"
+        }
+       },
+       "timezone": {
+        "name": "America/Los_Angeles",
+        "offset": -25200,
+        "abbr": "PDT",
+        "abbrName": "Pacific Daylight Time",
+        "isDst": true
+       },
+       "visible": true
+      },
+      "real": null
+     },
+     "time": {
+      "scheduled": {
+       "departure": 1785366480,
+       "arrival": 1785385560
+      },
+      "real": {
+       "departure": null,
+       "arrival": null
+      },
+      "estimated": {
+       "departure": 1785366480,
+       "arrival": null
+      },
+      "other": {
+       "eta": null,
+       "updated": 1785103364,
+       "duration": null
+      }
+     }
+    },
+    {
+     "identification": {
+      "id": null,
+      "row": 5843048242,
+      "number": {
+       "default": "AS434",
+       "alternative": null
+      },
+      "callsign": null,
+      "codeshare": null
+     },
+     "status": {
+      "live": false,
+      "text": "Estimated dep 09:41",
+      "icon": "green",
+      "estimated": null,
+      "ambiguous": false,
+      "generic": {
+       "status": {
+        "text": "estimated",
+        "type": "departure",
+        "color": "green",
+        "diverted": null
+       },
+       "eventTime": {
+        "utc": 1785343260,
+        "local": 1785318060
+       }
+      }
+     },
+     "aircraft": {
+      "model": {
+       "code": "B739",
+       "text": "Boeing 737-990(ER)"
+      },
+      "registration": "N265AK",
+      "country": {
+       "id": 236,
+       "name": "United States",
+       "alpha2": "US",
+       "alpha3": "USA"
+      },
+      "hex": "A2919A",
+      "restricted": false,
+      "serialNo": null,
+      "age": {
+       "availability": true
+      },
+      "availability": {
+       "serialNo": true,
+       "age": true
+      }
+     },
+     "owner": {
+      "name": "Alaska Airlines",
+      "code": {
+       "iata": "AS",
+       "icao": "ASA"
+      }
+     },
+     "airline": {
+      "name": "Alaska Airlines (Honoring Those Who Serve Livery)",
+      "code": {
+       "iata": "AS",
+       "icao": "ASA"
+      },
+      "short": "Alaska Airlines"
+     },
+     "airport": {
+      "origin": {
+       "name": "San Diego International Airport",
+       "code": {
+        "iata": "SAN",
+        "icao": "KSAN"
+       },
+       "position": {
+        "latitude": 32.733551,
+        "longitude": -117.189003,
+        "country": {
+         "name": "United States",
+         "code": "US",
+         "id": 236
+        },
+        "region": {
+         "city": "San Diego"
+        }
+       },
+       "timezone": {
+        "name": "America/Los_Angeles",
+        "offset": -25200,
+        "abbr": "PDT",
+        "abbrName": "Pacific Daylight Time",
+        "isDst": true
+       },
+       "visible": true
+      },
+      "destination": {
+       "name": "Raleigh-Durham International Airport",
+       "code": {
+        "iata": "RDU",
+        "icao": "KRDU"
+       },
+       "position": {
+        "latitude": 35.877628,
+        "longitude": -78.787399,
+        "country": {
+         "name": "United States",
+         "code": "US",
+         "id": 236
+        },
+        "region": {
+         "city": "Raleigh-Durham"
+        }
+       },
+       "timezone": {
+        "name": "America/New_York",
+        "offset": -14400,
+        "abbr": "EDT",
+        "abbrName": "Eastern Daylight Time",
+        "isDst": true
+       },
+       "visible": true
+      },
+      "real": null
+     },
+     "time": {
+      "scheduled": {
+       "departure": 1785343260,
+       "arrival": 1785362460
+      },
+      "real": {
+       "departure": null,
+       "arrival": null
+      },
+      "estimated": {
+       "departure": 1785343260,
+       "arrival": null
+      },
+      "other": {
+       "eta": null,
+       "updated": 1785103377,
+       "duration": null
+      }
+     }
+    }
+   ]
+  }
+ }
+}

@@ -1,0 +1,15 @@
+[Unit]
+Description=Aircraft Livery Tracker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__WORKDIR__
+ExecStart=__WORKDIR__/.venv/bin/python -m livery_tracker
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

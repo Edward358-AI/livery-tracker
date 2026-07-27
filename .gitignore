@@ -1,0 +1,16 @@
+# Secrets & runtime state
+.env
+data/*
+!data/.gitkeep
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+
+# Logs / process files
+*.log
+tracker.pid

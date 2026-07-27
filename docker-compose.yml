@@ -1,0 +1,12 @@
+services:
+  livery-tracker:
+    build: .
+    container_name: livery-tracker
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false   # credentials can instead live in ./data/.env (written by --setup)
+    environment:
+      - LT_DATA_DIR=/app/data
+    volumes:
+      - ./data:/app/data
