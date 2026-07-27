@@ -29,6 +29,68 @@ from [OurAirports](https://ourairports.com).
 5. **Crash-safe** — all state lives in `data/*.json`; on restart the tracker resumes
    every pending flight exactly where it left off.
 
+## What you need before you start
+
+### Everyone
+
+| Requirement | Why |
+|---|---|
+| A **Telegram account** | You'll create two free bots with [@BotFather](https://t.me/BotFather) during setup — the wizard walks you through it |
+| A machine that **stays on** | Live tracking only happens while the tracker is running. A always-on desktop, home server, or Raspberry Pi is ideal; a laptop that sleeps will miss flights |
+| **Internet access** | Everything is fetched live — no offline mode |
+| ~**300 MB free disk** | Python packages, plus a ~9 MB airport database cached on first run |
+
+No paid accounts, API keys, or subscriptions — ever.
+
+### Windows
+
+**Nothing to pre-install.** The one-line installer detects Python and offers to
+install it for you via `winget` (built into Windows 10 1809+ and Windows 11).
+
+If you're on an older Windows without `winget`, install
+[Python 3.10 or newer](https://www.python.org/downloads/) first and tick
+**"Add python.exe to PATH"** in the installer.
+
+### Linux / macOS / Raspberry Pi
+
+You need **Python 3.10+** (with `venv`), plus `curl` and `tar` — the latter two
+are already on virtually every system.
+
+```bash
+# Debian / Ubuntu / Raspberry Pi OS
+sudo apt update && sudo apt install -y python3 python3-venv curl
+
+# Fedora
+sudo dnf install -y python3 curl
+
+# macOS (Python 3 also comes with Xcode Command Line Tools)
+brew install python
+```
+
+> On Debian-based systems `python3-venv` is a **separate package** from
+> `python3` — the installer will fail without it, so don't skip it.
+
+### Only for the advanced paths
+
+| Path | Extra requirement |
+|---|---|
+| Git checkout | [Git](https://git-scm.com/downloads) |
+| Docker | [Docker Desktop](https://www.docker.com/products/docker-desktop/) or Docker Engine |
+| Windows always-on service | [NSSM](https://nssm.cc) (`winget install NSSM.NSSM`) + admin rights |
+
+### Installed for you automatically
+
+You never install these by hand — the installer puts them in an isolated virtual
+environment, so nothing touches your system Python:
+
+| Package | Used for |
+|---|---|
+| `python-telegram-bot[job-queue]` | Bot commands, message edits, and all scheduling |
+| `curl_cffi` | Chrome-impersonating requests for schedule harvesting |
+| `httpx` | Plain HTTP for the ADS-B and airport APIs |
+| `beautifulsoup4` | HTML parsing for the FlightAware fallback |
+| `python-dotenv` | Reading your `.env` credentials |
+
 ## Quick start — one line, no git, no Docker
 
 **Windows** (paste into PowerShell):
