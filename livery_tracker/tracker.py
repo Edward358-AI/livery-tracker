@@ -181,6 +181,7 @@ async def job_poll(context: ContextTypes.DEFAULT_TYPE) -> None:
         "gs": telemetry.gs_kts,
         "dist_nm": dist_nm,
         "on_ground": telemetry.on_ground,
+        "baro_rate": telemetry.baro_rate,
         "seen_at": now.isoformat(),
         "divert_hits": prev_divert_hits + 1 if divert_candidate else 0,
     }
@@ -249,10 +250,15 @@ def _conclude_dark_leg(event: FlightEvent, now: datetime) -> tuple[EventState, s
     if event.type == EventType.ARRIVAL:
         alt = last.get("alt")
         dist = last.get("dist_nm")
+        rate = last.get("baro_rate")
+        # Low + near is only a landing if the plane wasn't climbing — a
+        # go-around (or fresh departure) looks identical except for the rate.
+        climbing = rate is not None and rate > 500
         on_approach = (
             (last.get("on_ground") or (alt is not None and alt <= APPROACH_MAX_ALT_FT))
             and dist is not None
             and dist <= APPROACH_MAX_DIST_NM
+            and not climbing
         )
         if on_approach:
             return EventState.LANDED, f"~{stamp} (signal lost on approach)"

@@ -35,6 +35,7 @@ def seen(minutes_ago: int, **fields) -> dict:
         "gs": 150.0,
         "dist_nm": 8.0,
         "on_ground": False,
+        "baro_rate": -600,
         "seen_at": (NOW - timedelta(minutes=minutes_ago)).isoformat(),
     }
     base.update(fields)
@@ -58,6 +59,14 @@ def test_dark_on_approach_becomes_landed():
     state, note = _conclude_dark_leg(ev, NOW)
     assert state == EventState.LANDED
     assert "signal lost on approach" in note
+
+
+def test_dark_while_climbing_near_airport_is_not_landed():
+    # Real case observed at SFO: 1,250 ft / 1.7 NM but +3,392 fpm — a
+    # go-around or departure, not a landing. Must keep polling.
+    ev = make_live_event(EventType.ARRIVAL, NOW - timedelta(minutes=5),
+                         seen(8, alt=1250, dist_nm=1.7, baro_rate=3392))
+    assert _conclude_dark_leg(ev, NOW) is None
 
 
 def test_dark_at_cruise_keeps_polling_until_cap():

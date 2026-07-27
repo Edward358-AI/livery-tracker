@@ -40,8 +40,8 @@ def polite_delay() -> None:
     time.sleep(3 + random.uniform(0, 2))
 
 
-def fetch_flight_list(reg: str) -> list[dict[str, Any]] | None:
-    """Raw FR24 schedule rows for a registration (newest first).
+def fetch_flight_list(query: str, fetch_by: str = "reg") -> list[dict[str, Any]] | None:
+    """Raw FR24 schedule rows for a registration or flight number.
 
     Returns [] when FR24 answered but has nothing, None when every attempt
     failed — callers use that distinction to fall back / raise the alarm.
@@ -51,7 +51,7 @@ def fetch_flight_list(reg: str) -> list[dict[str, Any]] | None:
         try:
             resp = curl_requests.get(
                 FR24_LIST_URL,
-                params={"query": reg, "fetchBy": "reg", "page": 1, "limit": 25},
+                params={"query": query, "fetchBy": fetch_by, "page": 1, "limit": 25},
                 impersonate=profile,
                 timeout=30,
             )
@@ -206,9 +206,10 @@ class LegRefresh:
     cancelled: bool = False
 
 
-def refresh_leg_time(reg: str, event: FlightEvent) -> LegRefresh:
-    """T-2h re-scrape: current best ETA/ETD (and cancellation flag) for a leg."""
-    rows = fetch_flight_list(reg) or []
+def _best_leg_row(
+    rows: list[dict[str, Any]], event: FlightEvent
+) -> tuple[datetime, dict[str, Any]] | None:
+    """The row matching a leg's route with the closest schedule time (<6h drift)."""
     key = "arrival" if event.type == EventType.ARRIVAL else "departure"
     best: tuple[float, datetime, dict[str, Any]] | None = None
     for row in rows:
@@ -225,9 +226,24 @@ def refresh_leg_time(reg: str, event: FlightEvent) -> LegRefresh:
         drift = abs((when - event.scheduled_time).total_seconds())
         if drift < 6 * 3600 and (best is None or drift < best[0]):
             best = (drift, when, row)
+    return (best[1], best[2]) if best else None
+
+
+def refresh_leg_time(reg: str, event: FlightEvent) -> LegRefresh:
+    """T-2h re-scrape: current best ETA/ETD (and cancellation flag) for a leg.
+
+    FR24 unassigns the registration from cancelled flights, so if the by-reg
+    list no longer carries this leg, re-check by flight number — that's where
+    a cancellation will show up.
+    """
+    best = _best_leg_row(fetch_flight_list(reg) or [], event)
+    if best is None and event.flight_number:
+        best = _best_leg_row(
+            fetch_flight_list(event.flight_number, fetch_by="flight") or [], event
+        )
     if best is None:
         return LegRefresh(None)
-    return LegRefresh(best[1], cancelled=row_is_cancelled(best[2]))
+    return LegRefresh(best[0], cancelled=row_is_cancelled(best[1]))
 
 
 # ---------------------------------------------------------------------------

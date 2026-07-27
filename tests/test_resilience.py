@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 import livery_tracker.adsb as adsb
 import livery_tracker.airports as airports
+import livery_tracker.schedule_provider as sp
 from livery_tracker.adsb import Telemetry
 from livery_tracker.airports import Airport
 from livery_tracker.config import Config, data_dir
@@ -108,6 +109,35 @@ def test_resolve_callsign_route_handles_unknown_and_failure(monkeypatch):
     assert adsb.resolve_callsign_route("XXX123") is None
     monkeypatch.setattr(adsb, "get_json", lambda url: None)
     assert adsb.resolve_callsign_route("XXX123") is None
+
+
+# -- cancellation fallback by flight number -------------------------------------
+
+def test_refresh_falls_back_to_flight_number_for_cancellations(monkeypatch):
+    """FR24 unassigns the reg from cancelled flights (seen live with CX879
+    SFO->HKG): the by-reg list loses the leg, but the by-flight list still
+    shows it with status 'canceled'."""
+    dep_ts = int(NOW.timestamp())
+    cancelled_row = {
+        "airport": {
+            "origin": {"code": {"iata": "SFO"}},
+            "destination": {"code": {"iata": "HKG"}},
+        },
+        "time": {"scheduled": {"departure": dep_ts, "arrival": dep_ts + 14 * 3600}},
+        "status": {"generic": {"status": {"text": "canceled"}}},
+    }
+
+    def fake_fetch(query, fetch_by="reg"):
+        return [] if fetch_by == "reg" else [cancelled_row]
+
+    monkeypatch.setattr(sp, "fetch_flight_list", fake_fetch)
+    event = FlightEvent(
+        id="v", tail="B-KQN", livery="", type=EventType.DEPARTURE,
+        target_airport="SFO", scheduled_time=NOW,
+        route_origin="SFO", route_destination="HKG", flight_number="CX879",
+    )
+    result = sp.refresh_leg_time("B-KQN", event)
+    assert result.cancelled is True
 
 
 # -- schedule cache ------------------------------------------------------------
