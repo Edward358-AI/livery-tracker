@@ -26,6 +26,7 @@ from .config import Config
 from .digest import DigestManager, fmt_local
 from .flights import EventState, EventType, FlightEvent, FlightStore, append_history
 from .geo import haversine_nm
+from .resolver import resolve_aircraft
 
 log = logging.getLogger(__name__)
 
@@ -402,10 +403,47 @@ async def harvest_single(application: Application, tail: str) -> tuple[int, bool
     return new_count, ok
 
 
+METADATA_PLACEHOLDERS = {"", "Unknown airline", "Unknown type"}
+
+
+def _is_missing(value: object) -> bool:
+    return str(value or "").strip() in METADATA_PLACEHOLDERS
+
+
+async def heal_unknown_metadata(config: Config) -> int:
+    """Re-resolve watchlist entries whose airline or type never came through.
+
+    A tail added while the aircraft is parked has no FR24 schedule rows and no
+    live transponder data, so it can land in the watchlist as "Unknown". Once
+    the data exists, fill it in rather than leaving it wrong forever.
+    """
+    stale = [
+        tail for tail, meta in config.watchlist.items()
+        if _is_missing(meta.get("airline")) or _is_missing(meta.get("model"))
+    ]
+    healed = 0
+    for tail in stale:
+        info = await asyncio.to_thread(resolve_aircraft, tail)
+        entry = config.watchlist[tail]
+        changed = False
+        for key in ("airline", "model", "livery", "thumbnail"):
+            if _is_missing(entry.get(key)) and not _is_missing(info.get(key)):
+                entry[key] = info[key]
+                changed = True
+        if changed:
+            healed += 1
+            log.info("Filled in metadata for %s: %s / %s",
+                     tail, entry.get("airline"), entry.get("model"))
+    if healed:
+        config.save()
+    return healed
+
+
 async def run_harvest(application: Application) -> int:
     """Scrape schedules for every watched tail and refresh the digest."""
     store: FlightStore = application.bot_data["store"]
     config: Config = application.bot_data["config"]
+    await heal_unknown_metadata(config)
 
     # Roll stale legs (yesterday's) out of the store first, then collapse any
     # duplicates left over from schedule-time drift.

@@ -1,8 +1,15 @@
 """Zero-touch aircraft metadata resolution when a tail is added.
 
-Photo/thumbnail comes from the Planespotters public API; airline, model and
-livery name come from FR24's flight-list metadata (Planespotters' pub API only
-exposes photo data). adsb.fi's aircraft description is a last-resort fallback.
+Sources, in order:
+  * Planespotters  — photo/thumbnail (its pub API exposes photo data only)
+  * FR24           — airline, model, and the livery name, which FR24 encodes
+                     in the airline field, e.g. "Alaska Airlines (Retro Livery)"
+  * adsbdb         — static registration registry: airline + type even for an
+                     aircraft that is parked and hasn't flown recently
+  * adsb.fi        — live transponder description, last resort
+
+The adsbdb step matters because every other metadata source depends on the
+aircraft having flown recently; without it, a parked jet resolves as "Unknown".
 """
 
 from __future__ import annotations
@@ -16,7 +23,27 @@ from .web import get_json
 log = logging.getLogger(__name__)
 
 PLANESPOTTERS_URL = "https://api.planespotters.net/pub/photos/reg/{reg}"
+ADSBDB_AIRCRAFT_URL = "https://api.adsbdb.com/v0/aircraft/{reg}"
 ADSBFI_URL = "https://opendata.adsb.fi/api/v2/registration/{reg}"
+
+
+def _adsbdb_aircraft(reg: str) -> dict[str, str]:
+    """Airline/model from the adsbdb registration registry (static, no flight needed)."""
+    body = get_json(ADSBDB_AIRCRAFT_URL.format(reg=reg))
+    response = (body or {}).get("response")
+    if not isinstance(response, dict):
+        return {}  # adsbdb answers with a bare string for unknown registrations
+    aircraft = response.get("aircraft")
+    if not isinstance(aircraft, dict):
+        aircraft = response
+    airline = (aircraft.get("registered_owner") or "").strip()
+    model = " ".join(
+        part for part in (
+            (aircraft.get("manufacturer") or "").strip().title(),
+            (aircraft.get("type") or "").strip(),
+        ) if part
+    )
+    return {"airline": airline, "model": model}
 
 
 def resolve_aircraft(reg: str) -> dict[str, Any]:
@@ -44,6 +71,14 @@ def resolve_aircraft(reg: str) -> dict[str, Any]:
         info["model"] = meta["model"]
     if meta["livery"]:
         info["livery"] = meta["livery"]
+
+    # Static registry — fills in aircraft that are parked or rarely tracked.
+    if info["airline"] == "Unknown airline" or info["model"] == "Unknown type":
+        registry = _adsbdb_aircraft(reg)
+        if info["airline"] == "Unknown airline" and registry.get("airline"):
+            info["airline"] = registry["airline"]
+        if info["model"] == "Unknown type" and registry.get("model"):
+            info["model"] = registry["model"]
 
     if info["airline"] == "Unknown airline" or info["model"] == "Unknown type":
         body = get_json(ADSBFI_URL.format(reg=reg))
