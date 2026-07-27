@@ -47,17 +47,28 @@ def test_watch_synthesizes_live_arrival_with_estimated_eta():
     assert NOW < ev.scheduled_time < NOW + timedelta(hours=1)
 
 
-def test_watch_synthesizes_both_legs_between_watched_airports():
-    tele = airborne(35.8, -120.5)  # mid-route SFO->LAX
+def test_watch_synthesizes_both_legs_when_seen_leaving_origin():
+    # 25 NM out of SFO climbing through 12k: departure is observed, arrival tracked.
+    tele = airborne(37.30, -122.00, alt=12000, gs=320.0)
     events = synthesize_watch_events(
         "N265AK", "", tele, "SFO", "LAX", "AS1052", make_config(), NOW
     )
     types = {e.type for e in events}
     assert types == {EventType.ARRIVAL, EventType.DEPARTURE}
     dep = next(e for e in events if e.type == EventType.DEPARTURE)
-    # Already high and far from SFO: the departure is concluded immediately.
+    # Above 10k ft already: the departure milestone is complete.
     assert dep.status == EventState.DEPARTED
     assert "ADS-B watch" in dep.status_note
+
+
+def test_watch_distrusts_stale_origin_far_from_aircraft():
+    # Aircraft at cruise mid-country; route DB claims it left SFO. We can't
+    # verify that (adsbdb origins go stale, e.g. DFW vs ONT) -> arrival only.
+    tele = airborne(39.0, -111.0)
+    events = synthesize_watch_events(
+        "N265AK", "", tele, "SFO", "LAX", "AS1052", make_config(), NOW
+    )
+    assert [e.type for e in events] == [EventType.ARRIVAL]
 
 
 def test_watch_departure_still_climbing_stays_live():
@@ -68,6 +79,7 @@ def test_watch_departure_still_climbing_stays_live():
     assert len(events) == 1
     assert events[0].type == EventType.DEPARTURE
     assert events[0].status == EventState.LIVE
+    assert events[0].id == "N265AK-DEP-AS300-20260726-SFO"
 
 
 def test_watch_ignores_unwatched_routes():

@@ -130,7 +130,9 @@ On first run you'll be asked for:
   failures. If every schedule source fails, you get a warning from the command bot
   and **ADS-B watch mode** takes over — the tracker polls your tails' live positions
   every 15 minutes, resolves routes from callsigns via the free adsbdb.com API, and
-  synthesizes legs on the fly for anything touching your airports.
+  synthesizes legs on the fly for anything touching your airports. Because community
+  route databases can be stale, a claimed *origin* is only trusted when the aircraft
+  is actually observed near that airport; destinations self-verify via live tracking.
 - Every concluded leg is appended to `data/history.jsonl` with its final telemetry,
   so you can audit the inference decisions against reality and tune thresholds.
 

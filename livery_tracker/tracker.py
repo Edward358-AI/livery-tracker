@@ -55,6 +55,10 @@ DIVERT_CONFIRM_POLLS = 2
 
 # Schedule-less ADS-B watch mode (activates only when schedule sources fail).
 WATCH_INTERVAL = 900  # seconds between watch sweeps
+# Community route DBs (adsbdb) can be stale — e.g. a callsign's origin moving
+# from DFW to ONT. Origins are therefore only trusted when we actually observe
+# the aircraft near that airport; destinations self-verify via live tracking.
+WATCH_DEP_MAX_DIST_NM = 60.0
 
 
 def _now() -> datetime:
@@ -425,24 +429,31 @@ def synthesize_watch_events(
     if match:
         iata, info = match
         dist = haversine_nm(telemetry.lat, telemetry.lon, info["lat"], info["lon"])
-        ev = FlightEvent(
-            id=f"{tail}-DEP-{flight_no}-{date_tag}-{iata}",
-            tail=tail,
-            livery=livery,
-            type=EventType.DEPARTURE,
-            target_airport=iata,
-            scheduled_time=now,
-            route_origin=origin,
-            route_destination=dest,
-            flight_number=flight_no,
-        )
-        if telemetry.alt_ft >= DEPARTED_MIN_ALT_FT or dist >= DEPARTED_MIN_DIST_NM:
-            ev.status = EventState.DEPARTED
-            ev.status_note = f"~{fmt_local(now)} (detected via ADS-B watch)"
+        if dist <= WATCH_DEP_MAX_DIST_NM:
+            # We can see the aircraft actually leaving this airport — trustworthy.
+            ev = FlightEvent(
+                id=f"{tail}-DEP-{flight_no}-{date_tag}-{iata}",
+                tail=tail,
+                livery=livery,
+                type=EventType.DEPARTURE,
+                target_airport=iata,
+                scheduled_time=now,
+                route_origin=origin,
+                route_destination=dest,
+                flight_number=flight_no,
+            )
+            if telemetry.alt_ft >= DEPARTED_MIN_ALT_FT or dist >= DEPARTED_MIN_DIST_NM:
+                ev.status = EventState.DEPARTED
+                ev.status_note = f"~{fmt_local(now)} (detected via ADS-B watch)"
+            else:
+                ev.status = EventState.LIVE
+                ev.status_note = "found via ADS-B watch"
+            events.append(ev)
         else:
-            ev.status = EventState.LIVE
-            ev.status_note = "found via ADS-B watch"
-        events.append(ev)
+            log.info(
+                "Watch: skipping DEP leg for %s — %.0f NM from claimed origin %s "
+                "(route DB may be stale)", tail, dist, origin,
+            )
 
     return events
 
