@@ -73,7 +73,7 @@ crash), install [NSSM](https://nssm.cc) and use the bundled installer from an
 
 ```powershell
 winget install NSSM.NSSM     # then open a NEW admin PowerShell
-powershell -ExecutionPolicy Bypass -File install-service.ps1
+powershell -ExecutionPolicy Bypass -File install-service.ps1 # replace this with the actual PATH to the file
 ```
 
 Uninstall with `install-service.ps1 -Uninstall`. Logs go to `tracker.log`.
