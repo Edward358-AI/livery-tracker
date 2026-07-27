@@ -1,6 +1,6 @@
 # ✈️ Aircraft Livery Tracker
 
-Get a Telegram ping whenever one of your favorite special-livery aircraft is scheduled
+Get a live Telegram message whenever one of your favorite special-livery aircraft is scheduled
 to arrive at or depart from *your* airports — with live ADS-B tracking as it happens.
 
 **100% free.** No FlightAware AeroAPI subscription, no paid keys. Schedules come from
