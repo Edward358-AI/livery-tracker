@@ -464,16 +464,21 @@ async def run_harvest(application: Application) -> int:
     new_events = 0
     failed_tails: list[str] = []
     if config.watchlist and config.target_airports:
-        tails = list(config.watchlist.items())
-        for i, (tail, meta) in enumerate(tails):
+        # Pacing is handled inside fetch_flight_list by a process-wide minimum
+        # interval, so this loop deliberately does not sleep as well.
+        started = _now()
+        for tail, meta in config.watchlist.items():
             events, ok = await asyncio.to_thread(
                 schedule_provider.harvest_tail, tail, meta.get("livery", ""), config
             )
             if not ok:
                 failed_tails.append(tail)
             new_events += _register_new_events(application, events)
-            if i < len(tails) - 1:
-                await asyncio.to_thread(schedule_provider.polite_delay)
+        log.info(
+            "Swept %d tail(s) in %.1fs",
+            len(config.watchlist),
+            (_now() - started).total_seconds(),
+        )
     else:
         log.info("Harvest ran with empty watchlist or no target airports")
 

@@ -36,14 +36,14 @@ WINDOW_PAST = timedelta(hours=1)
 WINDOW_FUTURE = timedelta(hours=24)
 
 
-def polite_delay() -> None:
-    """3s +/- jitter between tail lookups, per the scraping etiquette in the spec."""
-    time.sleep(3 + random.uniform(0, 2))
-
-
 # Repeat lookups of the same tail within a few minutes (an impatient /info, a
 # double /refresh) are served from memory, and every real request is spaced
 # out — the schedule source is the one most likely to start blocking us.
+#
+# _LIST_SPACING is the single source of truth for how fast we may talk to
+# FR24: it applies process-wide, to every caller and every code path. The
+# harvest loop used to add its own 3-5s sleep on top, which only ever
+# doubled the wait without changing the guarantee.
 _LIST_MEMO = TTLCache(ttl_seconds=300)
 _LIST_SPACING = MinInterval(seconds=2.0)
 
