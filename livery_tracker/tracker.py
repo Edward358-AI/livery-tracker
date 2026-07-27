@@ -156,7 +156,23 @@ async def job_poll(context: ContextTypes.DEFAULT_TYPE) -> None:
     if telemetry is None:
         outcome = _conclude_dark_leg(event, now)
         if outcome is not None:
-            event.status, event.status_note = outcome
+            state, note = outcome
+            if state == EventState.LOST and event.last_telemetry.get("lat") is None:
+                # Never seen and past deadline — but maybe it's just delayed.
+                refresh = await asyncio.to_thread(
+                    schedule_provider.refresh_leg_time, event.tail, event
+                )
+                action = _apply_delay_pushback(event, refresh)
+                if action == "delayed":
+                    store.upsert(event)
+                    await _digest(application).refresh()
+                    schedule_event_jobs(application, event)
+                    context.job.schedule_removal()
+                    log.info("Leg %s pushed back: %s", event.id, event.status_note)
+                    return
+                if action == "cancelled":
+                    state, note = EventState.CANCELLED, ""
+            event.status, event.status_note = state, note
             store.upsert(event)
             append_history(event)
             await _digest(application).refresh()
@@ -225,6 +241,28 @@ async def job_poll(context: ContextTypes.DEFAULT_TYPE) -> None:
     if finished:
         context.job.schedule_removal()
         log.info("Leg %s finished: %s", event.id, event.status.value)
+
+
+DELAY_MIN_PUSHBACK = timedelta(minutes=10)
+
+
+def _apply_delay_pushback(
+    event: FlightEvent, refresh: schedule_provider.LegRefresh
+) -> str | None:
+    """When a no-show flight's schedule moved later, wait instead of giving up.
+
+    Returns "delayed" (event mutated back to WAITING_LIVE), "cancelled", or
+    None when the schedule offers no explanation.
+    """
+    if refresh.cancelled:
+        return "cancelled"
+    if refresh.new_time is not None and refresh.new_time > event.scheduled_time + DELAY_MIN_PUSHBACK:
+        delay_min = round((refresh.new_time - event.scheduled_time).total_seconds() / 60)
+        event.scheduled_time = refresh.new_time
+        event.status = EventState.WAITING_LIVE
+        event.status_note = f"delayed {delay_min}m"
+        return "delayed"
+    return None
 
 
 def _conclude_dark_leg(event: FlightEvent, now: datetime) -> tuple[EventState, str] | None:

@@ -3,8 +3,12 @@
 from datetime import datetime, timedelta, timezone
 
 from livery_tracker.flights import EventState, EventType, FlightEvent
-from livery_tracker.schedule_provider import row_is_cancelled
-from livery_tracker.tracker import LIVE_MAX_OVERRUN, _conclude_dark_leg
+from livery_tracker.schedule_provider import LegRefresh, row_is_cancelled
+from livery_tracker.tracker import (
+    LIVE_MAX_OVERRUN,
+    _apply_delay_pushback,
+    _conclude_dark_leg,
+)
 
 
 def make_live_event(ev_type: EventType, scheduled: datetime, telemetry: dict) -> FlightEvent:
@@ -97,6 +101,29 @@ def test_departure_dark_still_on_ground_keeps_polling():
     ev = make_live_event(EventType.DEPARTURE, NOW - timedelta(minutes=10),
                          seen(8, alt=0, on_ground=True, dist_nm=0.2))
     assert _conclude_dark_leg(ev, NOW) is None
+
+
+def test_delay_pushback_reverts_to_waiting():
+    ev = make_live_event(EventType.ARRIVAL, NOW - timedelta(minutes=35), NEVER_SEEN)
+    new_time = NOW + timedelta(hours=2)
+    action = _apply_delay_pushback(ev, LegRefresh(new_time))
+    assert action == "delayed"
+    assert ev.status == EventState.WAITING_LIVE
+    assert ev.scheduled_time == new_time
+    assert "delayed" in ev.status_note
+
+
+def test_delay_pushback_reports_cancellation():
+    ev = make_live_event(EventType.ARRIVAL, NOW - timedelta(minutes=35), NEVER_SEEN)
+    assert _apply_delay_pushback(ev, LegRefresh(None, cancelled=True)) == "cancelled"
+
+
+def test_delay_pushback_ignores_unchanged_schedule():
+    sched = NOW - timedelta(minutes=35)
+    ev = make_live_event(EventType.ARRIVAL, sched, NEVER_SEEN)
+    assert _apply_delay_pushback(ev, LegRefresh(sched)) is None
+    assert _apply_delay_pushback(ev, LegRefresh(None)) is None
+    assert ev.status == EventState.LIVE  # untouched
 
 
 def test_row_is_cancelled():

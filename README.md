@@ -119,7 +119,14 @@ On first run you'll be asked for:
   spaces lookups ~3s apart to be polite to the free endpoints.
 - Live polling only runs in a short window around each flight (T-45m for arrivals,
   T-15m for departures), once every 120 seconds.
-- **Cancellations** are detected at the T-2h schedule re-check (❌ in the digest).
+- **Telemetry coverage**: positions come from adsb.fi, then adsb.lol, then FR24's
+  satellite-backed feed as a last resort — so oceanic and remote flights (where
+  community receivers can't reach) are still visible.
+- **Delays**: harvest uses live estimated times; the T-2h re-check updates them; and
+  a flight that hasn't shown up 30 min past its time gets one more schedule check —
+  if it moved later, the leg waits for the new time instead of being marked lost.
+- **Cancellations** are detected at the T-2h schedule re-check (❌ in the digest),
+  with a by-flight-number fallback since FR24 unassigns tails from cancelled flights.
 - **Diversions**: an arrival confirmed on the ground 30+ NM from your airport on two
   consecutive polls is marked ↪️ *diverted*, with the nearest sizeable airport named.
 - **Signal loss**: ADS-B coverage is patchy near the ground, so a plane last seen low
