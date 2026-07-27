@@ -118,6 +118,11 @@ def test_delay_pushback_reports_cancellation():
     assert _apply_delay_pushback(ev, LegRefresh(None, cancelled=True)) == "cancelled"
 
 
+def test_delay_pushback_reports_aircraft_swap():
+    ev = make_live_event(EventType.ARRIVAL, NOW - timedelta(minutes=35), NEVER_SEEN)
+    assert _apply_delay_pushback(ev, LegRefresh(None, swapped=True)) == "swapped"
+
+
 def test_delay_pushback_ignores_unchanged_schedule():
     sched = NOW - timedelta(minutes=35)
     ev = make_live_event(EventType.ARRIVAL, sched, NEVER_SEEN)

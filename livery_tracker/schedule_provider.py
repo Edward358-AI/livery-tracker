@@ -268,29 +268,52 @@ def row_is_cancelled(row: dict[str, Any]) -> bool:
 class LegRefresh:
     new_time: datetime | None
     cancelled: bool = False
+    swapped: bool = False  # the flight runs, but no longer with our aircraft
+
+
+def _row_flight_number(row: dict[str, Any]) -> str:
+    return ((((row.get("identification") or {}).get("number")) or {}).get("default") or "").strip().upper()
+
+
+def _row_route(row: dict[str, Any]) -> tuple[str, str]:
+    airport = row.get("airport") or {}
+    origin = ((airport.get("origin") or {}).get("code")) or {}
+    dest = ((airport.get("destination") or {}).get("code")) or {}
+    return (
+        (origin.get("iata") or origin.get("icao") or "").upper(),
+        (dest.get("iata") or dest.get("icao") or "").upper(),
+    )
 
 
 def _best_leg_row(
     rows: list[dict[str, Any]], event: FlightEvent
 ) -> tuple[datetime, dict[str, Any]] | None:
-    """The row matching a leg's route with the closest schedule time (<6h drift)."""
+    """The row that is genuinely *this* leg, or None.
+
+    Identified by flight number first, then by the exact origin/destination
+    pair. Matching on a single endpoint is not enough: an aircraft can have
+    several departures from the same airport, and adopting a neighbouring
+    flight's time invents a delay that never happened.
+    """
     key = "arrival" if event.type == EventType.ARRIVAL else "departure"
-    best: tuple[float, datetime, dict[str, Any]] | None = None
-    for row in rows:
-        airport = row.get("airport") or {}
-        origin = (((airport.get("origin") or {}).get("code")) or {}).get("iata", "") or ""
-        dest = (((airport.get("destination") or {}).get("code")) or {}).get("iata", "") or ""
-        if event.type == EventType.ARRIVAL and dest.upper() != event.route_destination:
-            continue
-        if event.type == EventType.DEPARTURE and origin.upper() != event.route_origin:
-            continue
-        when = _leg_time(row, key)
-        if when is None:
-            continue
-        drift = abs((when - event.scheduled_time).total_seconds())
-        if drift < 6 * 3600 and (best is None or drift < best[0]):
-            best = (drift, when, row)
-    return (best[1], best[2]) if best else None
+    wanted_number = (event.flight_number or "").strip().upper()
+    wanted_route = (event.route_origin, event.route_destination)
+
+    by_number = [r for r in rows if wanted_number and _row_flight_number(r) == wanted_number]
+    by_route = [r for r in rows if _row_route(r) == wanted_route]
+
+    for pool in (by_number, by_route):
+        best: tuple[float, datetime, dict[str, Any]] | None = None
+        for row in pool:
+            when = _leg_time(row, key)
+            if when is None:
+                continue
+            drift = abs((when - event.scheduled_time).total_seconds())
+            if drift < 6 * 3600 and (best is None or drift < best[0]):
+                best = (drift, when, row)
+        if best is not None:
+            return (best[1], best[2])
+    return None
 
 
 def refresh_leg_time(reg: str, event: FlightEvent) -> LegRefresh:
@@ -301,13 +324,20 @@ def refresh_leg_time(reg: str, event: FlightEvent) -> LegRefresh:
     a cancellation will show up.
     """
     best = _best_leg_row(fetch_flight_list(reg) or [], event)
-    if best is None and event.flight_number:
-        best = _best_leg_row(
+    if best is not None:
+        return LegRefresh(best[0], cancelled=row_is_cancelled(best[1]))
+
+    # Our aircraft no longer lists this flight. Ask about the flight itself:
+    # cancelled outright, or still running with a different tail (a swap)?
+    if event.flight_number:
+        by_flight = _best_leg_row(
             fetch_flight_list(event.flight_number, fetch_by="flight") or [], event
         )
-    if best is None:
-        return LegRefresh(None)
-    return LegRefresh(best[0], cancelled=row_is_cancelled(best[1]))
+        if by_flight is not None:
+            if row_is_cancelled(by_flight[1]):
+                return LegRefresh(by_flight[0], cancelled=True)
+            return LegRefresh(None, swapped=True)
+    return LegRefresh(None)
 
 
 # ---------------------------------------------------------------------------

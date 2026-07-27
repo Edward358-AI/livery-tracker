@@ -116,7 +116,11 @@ async def job_refresh(context: ContextTypes.DEFAULT_TYPE) -> None:
         await _digest(application).refresh()
         log.info("Flight cancelled: %s", event.id)
         return
-    if result.new_time is not None:
+    if result.swapped:
+        # The flight is operating, just not with our aircraft — never rewrite
+        # the time from someone else's flight.
+        event.status_note = "aircraft swapped off this flight"
+    elif result.new_time is not None:
         drift_min = round((result.new_time - event.scheduled_time).total_seconds() / 60)
         if abs(drift_min) >= 1:
             event.status_note = f"{'delayed' if drift_min > 0 else 'early'} {abs(drift_min)}m"
@@ -173,6 +177,8 @@ async def job_poll(context: ContextTypes.DEFAULT_TYPE) -> None:
                     return
                 if action == "cancelled":
                     state, note = EventState.CANCELLED, ""
+                elif action == "swapped":
+                    note = "aircraft swapped off this flight"
             event.status, event.status_note = state, note
             store.upsert(event)
             append_history(event)
@@ -257,6 +263,8 @@ def _apply_delay_pushback(
     """
     if refresh.cancelled:
         return "cancelled"
+    if refresh.swapped:
+        return "swapped"
     if refresh.new_time is not None and refresh.new_time > event.scheduled_time + DELAY_MIN_PUSHBACK:
         delay_min = round((refresh.new_time - event.scheduled_time).total_seconds() / 60)
         event.scheduled_time = refresh.new_time
