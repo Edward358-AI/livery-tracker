@@ -27,6 +27,7 @@ STATE_EMOJI = {
     EventState.DEPARTED: "🛫",
     EventState.DIVERTED: "↪️",
     EventState.CANCELLED: "❌",
+    EventState.SWAPPED: "🔀",
     EventState.LOST: "⚠️",
 }
 
@@ -66,6 +67,8 @@ def _leg_detail(event: FlightEvent) -> str:
         return f"diverted — {event.status_note}" if event.status_note else "diverted"
     if event.status == EventState.CANCELLED:
         return "cancelled"
+    if event.status == EventState.SWAPPED:
+        return "aircraft swapped off this flight"
     if event.status == EventState.LOST:
         return f"tracking lost{f' ({event.status_note})' if event.status_note else ''}"
     detail = f"{when_label} {fmt_local(event.scheduled_time)}"

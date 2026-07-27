@@ -24,6 +24,7 @@ class EventState(str, Enum):
     DEPARTED = "DEPARTED"
     DIVERTED = "DIVERTED"          # confirmed on the ground far from the target
     CANCELLED = "CANCELLED"        # source reported the flight cancelled
+    SWAPPED = "SWAPPED"            # flight still runs, but with a different aircraft
     LOST = "LOST"                  # no ADS-B data past deadline
 
     @property
@@ -33,6 +34,7 @@ class EventState(str, Enum):
             EventState.DEPARTED,
             EventState.DIVERTED,
             EventState.CANCELLED,
+            EventState.SWAPPED,
             EventState.LOST,
         )
 

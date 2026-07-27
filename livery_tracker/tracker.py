@@ -118,10 +118,17 @@ async def job_refresh(context: ContextTypes.DEFAULT_TYPE) -> None:
         log.info("Flight cancelled: %s", event.id)
         return
     if result.swapped:
-        # The flight is operating, just not with our aircraft — never rewrite
-        # the time from someone else's flight.
-        event.status_note = "aircraft swapped off this flight"
-    elif result.new_time is not None:
+        # The flight is operating, just not with our aircraft. End the leg here:
+        # letting it reach live tracking would watch the *aircraft* rather than
+        # the flight, and report a departure/landing from whatever it really flew.
+        event.status = EventState.SWAPPED
+        event.status_note = "now flown by another aircraft"
+        store.upsert(event)
+        append_history(event)
+        await _digest(application).refresh()
+        log.info("Leg %s dropped: aircraft swapped off this flight", event.id)
+        return
+    if result.new_time is not None:
         drift_min = round((result.new_time - event.scheduled_time).total_seconds() / 60)
         if abs(drift_min) >= 1:
             event.status_note = f"{'delayed' if drift_min > 0 else 'early'} {abs(drift_min)}m"
@@ -179,7 +186,7 @@ async def job_poll(context: ContextTypes.DEFAULT_TYPE) -> None:
                 if action == "cancelled":
                     state, note = EventState.CANCELLED, ""
                 elif action == "swapped":
-                    note = "aircraft swapped off this flight"
+                    state, note = EventState.SWAPPED, "now flown by another aircraft"
             event.status, event.status_note = state, note
             store.upsert(event)
             append_history(event)
