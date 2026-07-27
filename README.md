@@ -229,8 +229,12 @@ year permanently. Position and schedules are always fetched live. Add
 
 ## Reading the digest
 
-The digest bot keeps exactly **one message per day**, edited in place as flights
-progress (yesterday's digest is deleted each morning). Example:
+The digest bot keeps **one message per day**, edited in place as flights
+progress (yesterday's digest is deleted each morning). If your watchlist grows
+past what a single Telegram message can hold (~4096 characters, roughly 45
+legs), the digest automatically continues into additional messages — each still
+edited in place, so it never stops updating no matter how many aircraft you
+watch. Example:
 
 ```
 ✈️ LIVERY DIGEST — Sun Jul 26

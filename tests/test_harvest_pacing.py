@@ -12,7 +12,13 @@ from livery_tracker.throttle import MinInterval
 
 
 def test_fetch_flight_list_enforces_minimum_spacing(monkeypatch):
-    """Consecutive live lookups are spaced by the process-wide floor."""
+    """Consecutive live lookups are spaced by the process-wide floor.
+
+    Uses a scaled-down interval with generous slack: Windows' sleep
+    granularity is ~15ms, so a tight tolerance here makes the test flaky
+    without saying anything more about the behaviour.
+    """
+    interval, tolerance = 0.25, 0.05
     calls: list[float] = []
 
     class FakeResponse:
@@ -28,14 +34,15 @@ def test_fetch_flight_list_enforces_minimum_spacing(monkeypatch):
 
     monkeypatch.setattr(sp.curl_requests, "get", fake_get)
     monkeypatch.setattr(sp, "_LIST_MEMO", sp.TTLCache(ttl_seconds=0))  # defeat memoisation
-    monkeypatch.setattr(sp, "_LIST_SPACING", MinInterval(seconds=0.2))  # scaled down
+    monkeypatch.setattr(sp, "_LIST_SPACING", MinInterval(seconds=interval))
 
     for reg in ("N1", "N2", "N3"):
         sp.fetch_flight_list(reg)
 
     assert len(calls) == 3
     gaps = [b - a for a, b in zip(calls, calls[1:])]
-    assert all(gap >= 0.19 for gap in gaps), f"spacing floor not enforced: {gaps}"
+    assert all(gap >= interval - tolerance for gap in gaps), \
+        f"spacing floor not enforced: {gaps}"
 
 
 def test_repeat_lookups_are_memoised_not_refetched(monkeypatch):

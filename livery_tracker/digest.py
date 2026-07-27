@@ -211,26 +211,82 @@ _SECTION_BUILDERS = {
 }
 
 
-def render_digest(store: FlightStore, config: Config, now: datetime | None = None) -> str:
-    now = now or datetime.now().astimezone()
-    events = sorted(store.events.values(), key=lambda e: e.scheduled_time)
+# Telegram rejects a message over 4096 UTF-16 units; leave room for the
+# footer and a continuation marker rather than sailing right up to it.
+TELEGRAM_LIMIT = 4096
+SAFE_LIMIT = 3900
 
+
+def telegram_length(text: str) -> int:
+    """Telegram counts UTF-16 code units, so most emoji cost 2, not 1."""
+    return len(text.encode("utf-16-le")) // 2
+
+
+def _digest_body(store: FlightStore, config: Config, now: datetime) -> list[Section]:
+    events = sorted(store.events.values(), key=lambda e: e.scheduled_time)
+    if not events:
+        return [("", ["No watched aircraft scheduled at your target airports today."])]
+    builder = _SECTION_BUILDERS.get(config.digest_group_by, _sections_by_type)
+    return builder(events, config)
+
+
+def render_digest(store: FlightStore, config: Config, now: datetime | None = None) -> str:
+    """The whole digest as one string (used when it comfortably fits)."""
+    return "\n".join(render_digest_parts(store, config, now, limit=None))
+
+
+def render_digest_parts(
+    store: FlightStore,
+    config: Config,
+    now: datetime | None = None,
+    limit: int | None = SAFE_LIMIT,
+) -> list[str]:
+    """The digest as one message, or several when it would exceed `limit`.
+
+    Splits on section boundaries where possible, and within a section when a
+    single section is itself too long, so the digest can never become
+    unsendable no matter how many aircraft are watched. `limit=None` disables
+    splitting entirely.
+    """
+    now = now or datetime.now().astimezone()
     airports = ", ".join(sorted(config.target_airports)) or "no airports configured"
-    lines = [
+    header = [
         f"✈️ <b>LIVERY DIGEST — {now.strftime('%a %b %d')}</b>",
         f"<i>Watching {len(config.watchlist)} aircraft at {airports}</i>",
         "",
     ]
-    if not events:
-        lines.append("No watched aircraft scheduled at your target airports today.")
-    else:
-        builder = _SECTION_BUILDERS.get(config.digest_group_by, _sections_by_type)
-        for title, section_lines in builder(events, config):
-            lines.append(title)
-            lines.extend(section_lines)
-            lines.append("")
-    lines.append(f"<i>Updated {fmt_local(now)}</i>")
-    return "\n".join(lines)
+    footer = f"<i>Updated {fmt_local(now)}</i>"
+
+    body: list[str] = []
+    for title, section_lines in _digest_body(store, config, now):
+        if title:
+            body.append(title)
+        body.extend(section_lines)
+        body.append("")
+
+    if limit is None:
+        return ["\n".join(header + body + [footer])]
+
+    continuation = [
+        f"✈️ <b>LIVERY DIGEST — {now.strftime('%a %b %d')}</b> <i>(cont.)</i>",
+        "",
+    ]
+    parts: list[str] = []
+    current = list(header)
+    has_body = False
+
+    for line in body:
+        # Reserve room for whichever trailer this chunk ends up carrying.
+        projected = telegram_length("\n".join(current + [line, footer]))
+        if has_body and projected > limit:
+            parts.append("\n".join(current + ["<i>(continued below)</i>"]).rstrip())
+            current = list(continuation)
+            has_body = False
+        current.append(line)
+        has_body = True
+
+    parts.append("\n".join(current + [footer]).rstrip())
+    return parts
 
 
 class DigestManager:
@@ -268,49 +324,82 @@ class DigestManager:
             await self.bot.shutdown()
             self._ready = False
 
+    @staticmethod
+    def _stored_ids(state: dict) -> list[int]:
+        """Message ids from state, accepting the pre-split single-id format."""
+        ids = state.get("message_ids")
+        if isinstance(ids, list) and ids:
+            return ids
+        single = state.get("message_id")
+        return [single] if single else []
+
+    async def _delete(self, message_ids: list[int]) -> None:
+        for message_id in message_ids:
+            try:
+                await self.bot.delete_message(chat_id=self.chat_id, message_id=message_id)
+            except Exception as exc:  # noqa: BLE001 - >48h old, or already gone
+                log.debug("Could not delete digest message %s: %s", message_id, exc)
+
+    async def _send_all(self, parts: list[str], today: str) -> None:
+        sent: list[int] = []
+        try:
+            for text in parts:
+                msg = await self.bot.send_message(
+                    chat_id=self.chat_id,
+                    text=text,
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True,
+                )
+                sent.append(msg.message_id)
+        except Exception as exc:  # noqa: BLE001
+            log.error("Digest send failed: %s", exc)
+        if sent:
+            atomic_write_json(self._state_path(), {"date": today, "message_ids": sent})
+
     async def refresh(self) -> None:
-        """Re-render and push the digest: edit today's message, or send a fresh one."""
+        """Re-render and push the digest.
+
+        Normally this is a single message edited in place. Once a watchlist
+        grows past what fits in one Telegram message the digest is split, and
+        the parts are edited in place just the same — only a change in the
+        *number* of parts forces a resend.
+        """
         try:
             await self.ensure_ready()
         except Exception as exc:  # noqa: BLE001
             log.error("Digest bot failed to initialize: %s", exc)
             return
-        text = render_digest(self.store, self.config)
+
+        parts = render_digest_parts(self.store, self.config)
         today = datetime.now().astimezone().date().isoformat()
         state = self._load_state()
+        stored = self._stored_ids(state)
 
-        # New day: delete yesterday's digest so the chat only ever holds one message.
-        if state.get("message_id") and state.get("date") != today:
-            try:
-                await self.bot.delete_message(chat_id=self.chat_id, message_id=state["message_id"])
-            except Exception as exc:  # noqa: BLE001 - >48h old or already gone
-                log.debug("Could not delete old digest message: %s", exc)
+        # New day: drop yesterday's digest so the chat holds only today's.
+        if stored and state.get("date") != today:
+            await self._delete(stored)
+            stored = []
 
-        if state.get("date") == today and state.get("message_id"):
-            try:
-                await self.bot.edit_message_text(
-                    chat_id=self.chat_id,
-                    message_id=state["message_id"],
-                    text=text,
-                    parse_mode=ParseMode.HTML,
-                    disable_web_page_preview=True,
-                )
+        if state.get("date") == today and stored:
+            if len(stored) == len(parts):
+                for message_id, text in zip(stored, parts):
+                    try:
+                        await self.bot.edit_message_text(
+                            chat_id=self.chat_id,
+                            message_id=message_id,
+                            text=text,
+                            parse_mode=ParseMode.HTML,
+                            disable_web_page_preview=True,
+                        )
+                    except BadRequest as exc:
+                        if "not modified" not in str(exc).lower():
+                            log.warning("Digest edit failed: %s", exc)
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning("Digest edit failed: %s", exc)
                 return
-            except BadRequest as exc:
-                if "not modified" in str(exc).lower():
-                    return
-                log.warning("Digest edit failed (%s) — sending a new message", exc)
-            except Exception as exc:  # noqa: BLE001
-                log.warning("Digest edit failed: %s", exc)
-                return
+            # The digest grew or shrank by a whole message — rebuild it.
+            log.info("Digest split changed (%d -> %d parts) — resending",
+                     len(stored), len(parts))
+            await self._delete(stored)
 
-        try:
-            msg = await self.bot.send_message(
-                chat_id=self.chat_id,
-                text=text,
-                parse_mode=ParseMode.HTML,
-                disable_web_page_preview=True,
-            )
-            atomic_write_json(self._state_path(), {"date": today, "message_id": msg.message_id})
-        except Exception as exc:  # noqa: BLE001
-            log.error("Digest send failed: %s", exc)
+        await self._send_all(parts, today)
