@@ -313,6 +313,24 @@ def _conclude_dark_leg(event: FlightEvent, now: datetime) -> tuple[EventState, s
 # Harvesting
 # ---------------------------------------------------------------------------
 
+SAME_LEG_TOLERANCE = timedelta(hours=3)
+
+
+def _same_flight_leg(a: FlightEvent, b: FlightEvent) -> bool:
+    """Same physical flight leg, even if the estimated time drifted between
+    harvests (event ids embed the time, so ids alone can't dedupe this)."""
+    return (
+        a.tail == b.tail
+        and a.type == b.type
+        and a.target_airport == b.target_airport
+        and a.flight_number == b.flight_number
+        and a.route_origin == b.route_origin
+        and a.route_destination == b.route_destination
+        and abs((a.scheduled_time - b.scheduled_time).total_seconds())
+        <= SAME_LEG_TOLERANCE.total_seconds()
+    )
+
+
 def _register_new_events(application: Application, events: list[FlightEvent]) -> int:
     """Store + schedule any events we haven't seen yet; returns how many were new."""
     store: FlightStore = application.bot_data["store"]
@@ -320,10 +338,53 @@ def _register_new_events(application: Application, events: list[FlightEvent]) ->
     for event in events:
         if store.get(event.id) is not None:
             continue  # already tracked (e.g. /refresh re-run)
+        existing = next(
+            (ev for ev in store.events.values() if _same_flight_leg(ev, event)), None
+        )
+        if existing is not None:
+            # Same flight with a drifted estimate: update, don't duplicate.
+            drift = (event.scheduled_time - existing.scheduled_time).total_seconds()
+            if not existing.status.terminal and abs(drift) >= 60:
+                existing.scheduled_time = event.scheduled_time
+                store.upsert(existing)
+                if existing.status in (EventState.WAITING_2H, EventState.WAITING_LIVE):
+                    schedule_event_jobs(application, existing)
+            continue
         store.upsert(event)
         schedule_event_jobs(application, event)
         new_count += 1
     return new_count
+
+
+def _dedupe_store(application: Application) -> int:
+    """Collapse duplicate legs already in the store (same flight, drifted time).
+
+    Keeps a terminal copy if one exists (it reflects what actually happened),
+    otherwise the earliest-scheduled one.
+    """
+    store: FlightStore = application.bot_data["store"]
+    groups: list[list[FlightEvent]] = []
+    for event in sorted(store.events.values(), key=lambda e: e.scheduled_time):
+        for group in groups:
+            if _same_flight_leg(group[0], event):
+                group.append(event)
+                break
+        else:
+            groups.append([event])
+    removed = 0
+    for group in groups:
+        if len(group) < 2:
+            continue
+        keeper = next((e for e in group if e.status.terminal), group[0])
+        for event in group:
+            if event is keeper:
+                continue
+            _cancel_jobs(application, event.id)
+            store.remove_where(lambda ev, eid=event.id: ev.id == eid)
+            removed += 1
+    if removed:
+        log.info("Removed %d duplicate leg(s)", removed)
+    return removed
 
 
 async def harvest_single(application: Application, tail: str) -> tuple[int, bool]:
@@ -346,10 +407,12 @@ async def run_harvest(application: Application) -> int:
     store: FlightStore = application.bot_data["store"]
     config: Config = application.bot_data["config"]
 
-    # Roll stale legs (yesterday's) out of the store first.
+    # Roll stale legs (yesterday's) out of the store first, then collapse any
+    # duplicates left over from schedule-time drift.
     cutoff = _now() - STALE_AFTER
     for event in store.remove_where(lambda ev: ev.scheduled_time < cutoff):
         _cancel_jobs(application, event.id)
+    _dedupe_store(application)
 
     disable_watch_mode(application)  # re-armed below only if sources fail again
     new_events = 0
@@ -543,6 +606,7 @@ async def job_adsb_watch(context: ContextTypes.DEFAULT_TYPE) -> None:
 def rehydrate(application: Application) -> None:
     """After a restart, resume every non-terminal leg from flights_today.json."""
     store: FlightStore = application.bot_data["store"]
+    _dedupe_store(application)
     active = store.active()
     for event in active:
         schedule_event_jobs(application, event)
