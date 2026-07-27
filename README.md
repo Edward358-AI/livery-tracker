@@ -4,8 +4,7 @@ Get a live Telegram message whenever one of your favorite special-livery aircraf
 to arrive at or depart from *your* airports — with live ADS-B tracking as it happens.
 
 **100% free.** No FlightAware AeroAPI subscription, no paid keys. Schedules come from
-public flight-tracking pages, aircraft/livery metadata from the Planespotters and FR24
-public endpoints, live positions from the community ADS-B networks
+public flight-tracking pages, aircraft/livery metadata from the Planespotters, and live positions come from the community ADS-B networks
 ([adsb.fi](https://adsb.fi) / [adsb.lol](https://adsb.lol)), and airport coordinates
 from [OurAirports](https://ourairports.com).
 
@@ -250,7 +249,7 @@ Updated 7:57 PM PDT
 | `config_and_watch.json` | Target airports + watched aircraft |
 | `flights_today.json` | Today's tracked legs and their states (crash recovery) |
 | `digest_state.json` | Today's digest message id (for in-place edits) |
-| `schedule_cache.json` | Last good FR24 schedule per tail (12h outage buffer) |
+| `schedule_cache.json` | Cached schedule per tail (12h outage buffer) |
 | `history.jsonl` | Every concluded leg with final telemetry — audit/tuning log |
 | `airports.csv` | Cached OurAirports database (~9 MB, refreshed every 90 days) |
 
@@ -271,22 +270,19 @@ Updated 7:57 PM PDT
   spaces lookups ~3s apart to be polite to the free endpoints.
 - Live polling only runs in a short window around each flight (T-45m for arrivals,
   T-15m for departures), once every 120 seconds.
-- **Telemetry coverage**: positions come from adsb.fi, then adsb.lol, then FR24's
-  satellite-backed feed as a last resort — so oceanic and remote flights (where
-  community receivers can't reach) are still visible.
+- **Telemetry coverage**: positions come from adsb.fi, then adsb.lol, and then other public ADSB sources if the former are unavailable.
 - **Delays**: harvest uses live estimated times; the T-2h re-check updates them; and
   a flight that hasn't shown up 30 min past its time gets one more schedule check —
   if it moved later, the leg waits for the new time instead of being marked lost.
 - **Cancellations** are detected at the T-2h schedule re-check (❌ in the digest),
-  with a by-flight-number fallback since FR24 unassigns tails from cancelled flights.
+  with a by-flight-number fallback.
 - **Diversions**: an arrival confirmed on the ground 30+ NM from your airport on two
   consecutive polls is marked ↪️ *diverted*, with the nearest sizeable airport named.
 - **Signal loss**: ADS-B coverage is patchy near the ground, so a plane last seen low
   and close that goes dark is concluded ✅ *landed (signal lost on approach)*; one
   that never shows up at all is ⚠️ *lost* 30 min past schedule, and every live leg
   has a 3-hour hard stop.
-- **Source outages**: schedules are cached for 12h to ride out intra-day FR24
-  failures. If every schedule source fails, you get a warning from the command bot
+- **Source outages**: schedules are cached for 12h to ride out potential failures in the data. If every schedule source fails, you get a warning from the command bot
   and **ADS-B watch mode** takes over — the tracker polls your tails' live positions
   every 15 minutes, resolves routes from callsigns via the free adsbdb.com API, and
   synthesizes legs on the fly for anything touching your airports. Because community
