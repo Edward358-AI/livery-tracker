@@ -103,6 +103,68 @@ On first run you'll be asked for:
 | `/refresh` | Re-run today's schedule harvest right now |
 | `/status` | Watchlist size, airports, active flight legs |
 
+## Reading the digest
+
+The digest bot keeps exactly **one message per day**, edited in place as flights
+progress (yesterday's digest is deleted each morning). Example:
+
+```
+✈️ LIVERY DIGEST — Sun Jul 26
+Watching 5 aircraft at OAK, SFO, SJC
+
+🔁 Between your airports
+🚨 N265AK "West Coast Wonders" — SFO➔LAX AS1052, departed 9:04 AM PDT → 21,000 ft · 415 kts · 62 NM out
+
+🛬 Arrivals
+🚨 N8658A — DEN➔SFO WN4670 @ SFO, 5,025 ft · 235 kts · 17 NM out
+🟡 N8658A — LAS➔SJC WN1242 @ SJC, ETA 1:45 PM PDT
+
+🛫 Departures
+🕒 N642FR "Hugh the Manatee" — SFO➔LAX F92858 @ SFO, ETD 8:36 PM PDT
+
+Updated 7:57 PM PDT
+```
+
+### Status emojis (per flight leg)
+
+| Emoji | State | Meaning |
+|---|---|---|
+| 🟡 | Scheduled | Harvested; waiting for the T-2h schedule re-check |
+| 🕒 | Confirmed | Schedule re-checked at T-2h (shows `(delayed Xm)` if it moved) |
+| 🚨 | Live | Polling ADS-B every 2 min — shows altitude · speed · distance |
+| ✅ | Landed | Touched down at your airport (or concluded from signal loss on approach) |
+| 🛫 | Departed | Climbed through 10,000 ft or left 15 NM (or concluded after going dark airborne) |
+| ↪️ | Diverted | Confirmed on the ground 30+ NM away — names the nearest airport |
+| ❌ | Cancelled | The airline cancelled the flight (caught at the T-2h re-check) |
+| ⚠️ | Lost | Never appeared on ADS-B by 30 min past its time (after a delay re-check) |
+
+### Sections
+
+- **🛬 Arrivals / 🛫 Departures** — legs touching one of your airports.
+- **🔁 Between your airports** — a flight connecting *two* watched airports is shown
+  as one merged line, `departure phase → arrival phase` (it's still two
+  independently tracked legs under the hood).
+
+### Notes you may see on a leg
+
+- `(signal lost on approach)` / `(signal lost after takeoff)` — the aircraft went
+  dark near the ground (common — receiver coverage thins at low altitude) and the
+  outcome was inferred from its last known position and vertical rate.
+- `delayed 47m` — the schedule re-check found the flight running late.
+- `found via ADS-B watch` — the leg was discovered from live traffic during a
+  schedule-source outage, not from a schedule.
+
+## Files on disk (`data/`)
+
+| File | What it holds |
+|---|---|
+| `config_and_watch.json` | Target airports + watched aircraft |
+| `flights_today.json` | Today's tracked legs and their states (crash recovery) |
+| `digest_state.json` | Today's digest message id (for in-place edits) |
+| `schedule_cache.json` | Last good FR24 schedule per tail (12h outage buffer) |
+| `history.jsonl` | Every concluded leg with final telemetry — audit/tuning log |
+| `airports.csv` | Cached OurAirports database (~9 MB, refreshed every 90 days) |
+
 ## Configuration knobs (`.env`)
 
 | Variable | Default | Meaning |
