@@ -52,6 +52,9 @@ async def _post_init(application: Application) -> None:
     await application.bot.set_my_commands(BOT_COMMANDS)
     await application.bot_data["digest"].ensure_ready()
     tracker.rehydrate(application)
+    # Repaint from disk on startup: state can change while we are stopped
+    # (an upgrade, a manual edit), and the digest should never lag reality.
+    await application.bot_data["digest"].refresh()
     log.info("Livery Tracker is up.")
 
 
