@@ -12,9 +12,16 @@ import logging
 import time
 from dataclasses import dataclass
 
+from .throttle import MISS, TTLCache
 from .web import get_json
 
 log = logging.getLogger(__name__)
+
+# Positions go stale fast, so this window is short — just enough that a repeat
+# /info (or two legs of the same aircraft polling together) reuses one fetch.
+_TELEMETRY_MEMO = TTLCache(ttl_seconds=45)
+# Routes for a callsign are static for the day; the registry is slow-moving.
+_ROUTE_MEMO = TTLCache(ttl_seconds=3600)
 
 SOURCES = [
     "https://opendata.adsb.fi/api/v2/registration/{reg}",
@@ -42,7 +49,11 @@ def resolve_callsign_route(callsign: str) -> tuple[str, str, str] | None:
     adsbdb returns the string "unknown callsign" instead of an object when it
     has no route on file, so guard the shape carefully.
     """
-    body = get_json(ADSBDB_CALLSIGN_URL.format(callsign=callsign.strip()))
+    callsign = callsign.strip()
+    cached = _ROUTE_MEMO.get(callsign)
+    if cached is not MISS:
+        return cached
+    body = get_json(ADSBDB_CALLSIGN_URL.format(callsign=callsign))
     response = (body or {}).get("response")
     if not isinstance(response, dict):
         return None
@@ -52,11 +63,23 @@ def resolve_callsign_route(callsign: str) -> tuple[str, str, str] | None:
     if not origin or not dest:
         return None
     flight_no = (route.get("callsign_iata") or callsign).strip()
-    return origin, dest, flight_no
+    resolved = (origin, dest, flight_no)
+    _ROUTE_MEMO.set(callsign, resolved)
+    return resolved
 
 
 def fetch_telemetry(reg: str) -> Telemetry | None:
     """Latest position for a registration; None if no network is receiving it."""
+    reg = reg.upper()
+    cached = _TELEMETRY_MEMO.get(reg)
+    if cached is not MISS:
+        return cached
+    telemetry = _fetch_telemetry_uncached(reg)
+    _TELEMETRY_MEMO.set(reg, telemetry)
+    return telemetry
+
+
+def _fetch_telemetry_uncached(reg: str) -> Telemetry | None:
     for template in SOURCES:
         url = template.format(reg=reg)
         body = get_json(url)

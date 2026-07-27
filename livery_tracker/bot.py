@@ -17,6 +17,28 @@ from . import tracker, updater
 from .config import Config
 from .digest import DEFAULT_GROUP_MODE, GROUP_MODES
 from .resolver import resolve_aircraft
+from .throttle import Cooldown
+
+# Commands that fan out to the free APIs get per-user spacing so an impatient
+# tap-tap-tap can't turn into a burst of scraping. Tuned to be invisible in
+# normal use: /info is cheap enough to repeat, /refresh sweeps every tail.
+COOLDOWNS = {
+    "info": Cooldown(seconds=10),
+    "add": Cooldown(seconds=10),
+    "refresh": Cooldown(seconds=120),
+}
+
+
+async def _rate_limited(update: Update, name: str) -> bool:
+    """True (and warns the user) when this command is still cooling down."""
+    wait = COOLDOWNS[name].remaining(update.effective_chat.id)
+    if wait <= 0:
+        return False
+    await update.message.reply_text(
+        f"⏳ Easy there — /{name} again in {wait:.0f}s "
+        "(keeps us polite to the free data sources)."
+    )
+    return True
 
 log = logging.getLogger(__name__)
 
@@ -90,6 +112,8 @@ async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if tail in config.watchlist:
         await update.message.reply_text(f"{tail} is already on the watchlist.")
         return
+    if await _rate_limited(update, "add"):
+        return
     await update.message.reply_text(f"🔎 Resolving {tail} via Planespotters/FR24...")
     info = await asyncio.to_thread(resolve_aircraft, tail)
     config.watchlist[tail] = {
@@ -126,6 +150,8 @@ async def cmd_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Full dossier for any registration — watched or not."""
     if not context.args:
         await update.message.reply_text("Usage: /info <tail>  e.g. /info N265AK")
+        return
+    if await _rate_limited(update, "info"):
         return
     tail = context.args[0].upper()
     refresh = len(context.args) > 1 and context.args[1].lower() in ("refresh", "-r")
@@ -349,6 +375,8 @@ async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def cmd_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await _rate_limited(update, "refresh"):
+        return
     await update.message.reply_text("🔄 Running schedule harvest now...")
     context.application.create_task(
         _background_harvest(context.application, update.effective_chat.id)

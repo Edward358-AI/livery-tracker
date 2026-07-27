@@ -331,6 +331,13 @@ a real departure at one end and a real arrival at the other.
 
 - Schedule harvesting impersonates a real Chrome TLS fingerprint (`curl_cffi`) and
   spaces lookups ~3s apart to be polite to the free endpoints.
+- **Staying under the radar**: every source is rate-limited and memoised, since
+  these are free community services. Schedule lookups are spaced ≥2s apart
+  process-wide and cached 5 min; live positions cache 45s and callsign routes 1h;
+  aircraft facts cache 30 days and the airport database 90 days. On top of that,
+  `/info` and `/add` have a 10s per-user cooldown and `/refresh` a 2-minute one,
+  so repeat taps cost nothing — a second `/info` on the same tail makes **zero**
+  network calls. Failures are never cached, so an outage still retries.
 - Live polling only runs in a short window around each flight (T-45m for arrivals,
   T-15m for departures), once every 120 seconds.
 - **Telemetry coverage**: positions come from adsb.fi, then adsb.lol, and then other public ADSB sources if the former are unavailable.

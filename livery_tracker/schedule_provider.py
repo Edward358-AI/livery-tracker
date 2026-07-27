@@ -21,6 +21,7 @@ from curl_cffi import requests as curl_requests
 
 from .config import Config
 from .flights import EventType, FlightEvent
+from .throttle import MISS, MinInterval, TTLCache
 
 log = logging.getLogger(__name__)
 
@@ -40,15 +41,29 @@ def polite_delay() -> None:
     time.sleep(3 + random.uniform(0, 2))
 
 
+# Repeat lookups of the same tail within a few minutes (an impatient /info, a
+# double /refresh) are served from memory, and every real request is spaced
+# out — the schedule source is the one most likely to start blocking us.
+_LIST_MEMO = TTLCache(ttl_seconds=300)
+_LIST_SPACING = MinInterval(seconds=2.0)
+
+
 def fetch_flight_list(query: str, fetch_by: str = "reg") -> list[dict[str, Any]] | None:
     """Raw FR24 schedule rows for a registration or flight number.
 
     Returns [] when FR24 answered but has nothing, None when every attempt
     failed — callers use that distinction to fall back / raise the alarm.
+    Successful results are memoised briefly to absorb bursts.
     """
+    memo_key = (query.upper(), fetch_by)
+    cached = _LIST_MEMO.get(memo_key)
+    if cached is not MISS:
+        return cached
+
     last_error: str = ""
     for profile in IMPERSONATE_PROFILES:
         try:
+            _LIST_SPACING.wait()
             resp = curl_requests.get(
                 FR24_LIST_URL,
                 params={"query": query, "fetchBy": fetch_by, "page": 1, "limit": 25},
@@ -57,12 +72,14 @@ def fetch_flight_list(query: str, fetch_by: str = "reg") -> list[dict[str, Any]]
             )
             if resp.status_code == 200:
                 payload = resp.json()
-                return (((payload.get("result") or {}).get("response") or {}).get("data")) or []
+                rows = (((payload.get("result") or {}).get("response") or {}).get("data")) or []
+                _LIST_MEMO.set(memo_key, rows)
+                return rows
             last_error = f"HTTP {resp.status_code}"
         except Exception as exc:  # noqa: BLE001
             last_error = repr(exc)
         time.sleep(1 + random.uniform(0, 2))
-    log.warning("FR24 flight list failed for %s (%s)", reg, last_error)
+    log.warning("FR24 flight list failed for %s (%s)", query, last_error)
     return None
 
 
