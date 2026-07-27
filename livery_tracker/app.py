@@ -109,6 +109,7 @@ async def harvest_once(creds: Credentials) -> int:
     application = build_application(creds)
     async with application:
         try:
-            return await tracker.run_harvest(application)
+            result = await tracker.run_harvest(application)
+            return result.new_legs
         finally:
             await application.bot_data["digest"].aclose()

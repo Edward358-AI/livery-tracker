@@ -329,8 +329,14 @@ a real departure at one end and a real arrival at the other.
 
 ## Notes on data sources & resilience
 
-- Schedule harvesting impersonates a real Chrome TLS fingerprint (`curl_cffi`) and
-  spaces lookups ~3s apart to be polite to the free endpoints.
+- **Two-phase harvest**: first a sweep of your airports' arrival/departure boards
+  (~20 requests, under a minute) which publishes the digest straight away, then a
+  slower per-tail sweep that fills in anything the boards omit — a board entry has
+  no registration until the airline assigns a tail. A flight found by both phases
+  updates in place rather than appearing twice. Only one harvest runs at a time;
+  a `/refresh` during one is ignored.
+- Schedule harvesting impersonates a real Chrome TLS fingerprint (`curl_cffi`), and
+  a single process-wide minimum interval keeps every request ≥2s apart.
 - **Staying under the radar**: every source is rate-limited and memoised, since
   these are free community services. Schedule lookups are spaced ≥2s apart
   process-wide and cached 5 min; live positions cache 45s and callsign routes 1h;

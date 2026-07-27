@@ -259,6 +259,130 @@ def upcoming_flights(
     return flights[:limit]
 
 
+# ---------------------------------------------------------------------------
+# Airport boards — "what is flying in/out of MY airports?"
+#
+# The inverse of the per-tail query. Cost scales with the number of airports
+# (3) instead of the watchlist (77+), so it stays flat as the fleet grows.
+# Entries carry the same shape as flight-list rows, except the queried
+# airport's own code is omitted (it is implied), so we inject it back.
+# ---------------------------------------------------------------------------
+
+AIRPORT_BOARD_URL = "https://api.flightradar24.com/common/v1/airport.json"
+BOARD_PAGE_SIZE = 100          # server-side maximum; larger values are rejected
+BOARD_MAX_PAGES = 12           # stops runaway paging at very busy airports
+_BOARD_MEMO = TTLCache(ttl_seconds=300)
+
+
+def _fetch_board_page(code: str, mode: str, page: int) -> list[dict[str, Any]] | None:
+    memo_key = (code.upper(), mode, page)
+    cached = _BOARD_MEMO.get(memo_key)
+    if cached is not MISS:
+        return cached
+
+    params = {
+        "code": code,
+        "plugin[]": "schedule",
+        "plugin-setting[schedule][mode]": mode,
+        "plugin-setting[schedule][timestamp]": int(time.time()),
+        "page": page,
+        "limit": BOARD_PAGE_SIZE,
+    }
+    for profile in IMPERSONATE_PROFILES:
+        try:
+            _LIST_SPACING.wait()
+            resp = curl_requests.get(
+                AIRPORT_BOARD_URL, params=params, impersonate=profile, timeout=40
+            )
+            if resp.status_code == 200:
+                body = resp.json()
+                airport = (((body.get("result") or {}).get("response") or {}).get("airport")) or {}
+                schedule = ((airport.get("pluginData") or {}).get("schedule") or {})
+                data = ((schedule.get(mode) or {}).get("data")) or []
+                _BOARD_MEMO.set(memo_key, data)
+                return data
+        except Exception:  # noqa: BLE001
+            pass
+        time.sleep(1 + random.uniform(0, 2))
+    log.warning("Airport board failed for %s %s page %s", code, mode, page)
+    return None
+
+
+def fetch_airport_board(
+    code: str, mode: str, now: datetime | None = None
+) -> list[dict[str, Any]] | None:
+    """Board rows for one airport/direction covering the harvest window.
+
+    Pages adaptively: a quiet airport needs one page, a hub several. Returns
+    rows in flight-list shape, or None if the first page could not be read.
+    """
+    now = now or datetime.now(timezone.utc)
+    horizon = now + WINDOW_FUTURE
+    key = "arrival" if mode == "arrivals" else "departure"
+    rows: list[dict[str, Any]] = []
+
+    for page in range(1, BOARD_MAX_PAGES + 1):
+        data = _fetch_board_page(code, mode, page)
+        if data is None:
+            return rows or None
+        if not data:
+            break
+        latest: datetime | None = None
+        for entry in data:
+            flight = entry.get("flight") or entry
+            _inject_queried_airport(flight, code, mode)
+            rows.append(flight)
+            when = _leg_time(flight, key)
+            if when and (latest is None or when > latest):
+                latest = when
+        if latest is not None and latest >= horizon:
+            break  # the window is covered
+    return rows
+
+
+def _inject_queried_airport(flight: dict[str, Any], code: str, mode: str) -> None:
+    """Put back the airport code the board leaves implicit."""
+    airport = flight.setdefault("airport", {})
+    side = "destination" if mode == "arrivals" else "origin"
+    entry = airport.get(side)
+    if not isinstance(entry, dict):
+        entry = {}
+        airport[side] = entry
+    if not entry.get("code"):
+        entry["code"] = {"iata": code.upper(), "icao": ""}
+
+
+def harvest_airport_boards(
+    config: Config, now: datetime | None = None
+) -> tuple[list[FlightEvent], bool]:
+    """Sweep every configured airport's boards and keep watched aircraft.
+
+    Returns (events, sources_ok). Reuses rows_to_events, so filtering and leg
+    construction behave exactly as they do for the per-tail path.
+    """
+    now = now or datetime.now(timezone.utc)
+    watchlist = {reg.upper(): meta for reg, meta in config.watchlist.items()}
+    by_reg: dict[str, list[dict[str, Any]]] = {}
+    sources_ok = True
+
+    for code in config.target_airports:
+        for mode in ("arrivals", "departures"):
+            rows = fetch_airport_board(code, mode, now=now)
+            if rows is None:
+                sources_ok = False
+                continue
+            for row in rows:
+                reg = ((row.get("aircraft") or {}).get("registration") or "").upper()
+                if reg and reg in watchlist:
+                    by_reg.setdefault(reg, []).append(row)
+
+    events: list[FlightEvent] = []
+    for reg, reg_rows in by_reg.items():
+        livery = watchlist[reg].get("livery", "")
+        events.extend(rows_to_events(reg, livery, reg_rows, config, now=now))
+    return events, sources_ok
+
+
 def row_is_cancelled(row: dict[str, Any]) -> bool:
     status = (((row.get("status") or {}).get("generic")) or {}).get("status") or {}
     return "cancel" in str(status.get("text", "")).lower()

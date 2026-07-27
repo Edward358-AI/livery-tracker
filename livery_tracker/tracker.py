@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Callable
 
@@ -447,10 +448,53 @@ async def heal_unknown_metadata(config: Config) -> int:
     return healed
 
 
-async def run_harvest(application: Application) -> int:
-    """Scrape schedules for every watched tail and refresh the digest."""
+@dataclass
+class HarvestResult:
+    """Outcome of a two-phase harvest, for the caller to report."""
+
+    board_legs: int = 0
+    tail_legs: int = 0
+    failed_tails: list[str] = field(default_factory=list)
+    skipped: bool = False          # another harvest was already running
+    board_sources_ok: bool = True
+
+    @property
+    def new_legs(self) -> int:
+        return self.board_legs + self.tail_legs
+
+
+# One harvest at a time. A sweep now outlives the /refresh cooldown, so this
+# is what actually prevents two overlapping sweeps hammering the sources.
+_harvest_lock = asyncio.Lock()
+
+
+def harvest_in_progress() -> bool:
+    return _harvest_lock.locked()
+
+
+async def run_harvest(application: Application) -> HarvestResult:
+    """Two-phase harvest.
+
+    Phase 1 sweeps the airport boards — a handful of requests that cover every
+    watched tail at once, so the digest is populated in well under a minute.
+    Phase 2 then does the slower authoritative per-tail sweep, which catches
+    flights the boards omit (a board entry has no registration until the
+    airline assigns one) and refreshes times. Both phases feed the same
+    de-duplicating registration path, so a flight found twice updates in place
+    rather than appearing twice.
+    """
+    if _harvest_lock.locked():
+        log.info("Harvest already running — ignoring duplicate request")
+        return HarvestResult(skipped=True)
+
+    async with _harvest_lock:
+        return await _run_harvest_locked(application)
+
+
+async def _run_harvest_locked(application: Application) -> HarvestResult:
     store: FlightStore = application.bot_data["store"]
     config: Config = application.bot_data["config"]
+    result = HarvestResult()
     await heal_unknown_metadata(config)
 
     # Roll stale legs (yesterday's) out of the store first, then collapse any
@@ -461,28 +505,43 @@ async def run_harvest(application: Application) -> int:
     _dedupe_store(application)
 
     disable_watch_mode(application)  # re-armed below only if sources fail again
-    new_events = 0
-    failed_tails: list[str] = []
-    if config.watchlist and config.target_airports:
-        # Pacing is handled inside fetch_flight_list by a process-wide minimum
-        # interval, so this loop deliberately does not sleep as well.
-        started = _now()
-        for tail, meta in config.watchlist.items():
-            events, ok = await asyncio.to_thread(
-                schedule_provider.harvest_tail, tail, meta.get("livery", ""), config
-            )
-            if not ok:
-                failed_tails.append(tail)
-            new_events += _register_new_events(application, events)
-        log.info(
-            "Swept %d tail(s) in %.1fs",
-            len(config.watchlist),
-            (_now() - started).total_seconds(),
-        )
-    else:
-        log.info("Harvest ran with empty watchlist or no target airports")
 
-    if failed_tails:
+    if not (config.watchlist and config.target_airports):
+        log.info("Harvest ran with empty watchlist or no target airports")
+        await _digest(application).refresh()
+        return result
+
+    # --- Phase 1: airport boards (fast, flat cost) --------------------------
+    started = _now()
+    board_events, boards_ok = await asyncio.to_thread(
+        schedule_provider.harvest_airport_boards, config
+    )
+    result.board_sources_ok = boards_ok
+    result.board_legs = _register_new_events(application, board_events)
+    log.info(
+        "Board sweep: %d new leg(s) from %d airport(s) in %.1fs%s",
+        result.board_legs, len(config.target_airports),
+        (_now() - started).total_seconds(),
+        "" if boards_ok else " (some boards unavailable)",
+    )
+    # Publish what we have immediately — the slow sweep only adds to this.
+    await _digest(application).refresh()
+
+    # --- Phase 2: per-tail sweep (authoritative, catches board gaps) --------
+    started = _now()
+    for tail, meta in config.watchlist.items():
+        events, ok = await asyncio.to_thread(
+            schedule_provider.harvest_tail, tail, meta.get("livery", ""), config
+        )
+        if not ok:
+            result.failed_tails.append(tail)
+        result.tail_legs += _register_new_events(application, events)
+    log.info(
+        "Tail sweep: %d additional leg(s) across %d tail(s) in %.1fs",
+        result.tail_legs, len(config.watchlist), (_now() - started).total_seconds(),
+    )
+
+    if result.failed_tails:
         newly_armed = enable_watch_mode(application)
         chat_id = application.bot_data.get("chat_id")
         if newly_armed and chat_id:
@@ -490,7 +549,7 @@ async def run_harvest(application: Application) -> int:
                 await application.bot.send_message(
                     chat_id,
                     "⚠️ Schedule sources unreachable for: "
-                    + ", ".join(failed_tails)
+                    + ", ".join(result.failed_tails)
                     + ".\nADS-B watch mode is active — I'll pick these tails up "
                     "from live traffic if they fly to/from your airports.",
                 )
@@ -498,9 +557,10 @@ async def run_harvest(application: Application) -> int:
                 log.warning("Failed to send source-failure alert: %s", exc)
 
     await _digest(application).refresh()
-    log.info("Harvest complete: %d new leg(s), %d source failure(s)",
-             new_events, len(failed_tails))
-    return new_events
+    log.info("Harvest complete: %d new leg(s) (%d board, %d tail), %d source failure(s)",
+             result.new_legs, result.board_legs, result.tail_legs,
+             len(result.failed_tails))
+    return result
 
 
 async def purge_events(

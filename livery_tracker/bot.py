@@ -81,15 +81,22 @@ async def _background_harvest(application, chat_id: int, tail: str | None = None
     try:
         if tail:
             count, sources_ok = await tracker.harvest_single(application, tail)
+            message = f"📋 Digest updated — {count} new flight leg(s) found."
+            if not sources_ok:
+                message += (
+                    "\n⚠️ Schedule sources were unreachable — ADS-B watch mode is "
+                    "active and will pick this tail up from live traffic."
+                )
         else:
-            count = await tracker.run_harvest(application)
-            sources_ok = True  # run_harvest sends its own source-failure alert
-        message = f"📋 Digest updated — {count} new flight leg(s) found."
-        if not sources_ok:
-            message += (
-                "\n⚠️ Schedule sources were unreachable — ADS-B watch mode is active "
-                "and will pick this tail up from live traffic."
-            )
+            result = await tracker.run_harvest(application)
+            if result.skipped:
+                message = "⏳ A harvest is already running — this request was ignored."
+            else:
+                message = (
+                    f"📋 Harvest complete — {result.new_legs} new flight leg(s) "
+                    f"({result.board_legs} from airport boards, "
+                    f"{result.tail_legs} from the per-tail sweep)."
+                )
         await application.bot.send_message(chat_id, message)
     except Exception:  # noqa: BLE001
         log.exception("Background harvest failed")
@@ -375,9 +382,18 @@ async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def cmd_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # A sweep now outlives the cooldown window, so check the harvest lock too.
+    if tracker.harvest_in_progress():
+        await update.message.reply_text(
+            "⏳ A harvest is already running — sit tight, the digest updates itself."
+        )
+        return
     if await _rate_limited(update, "refresh"):
         return
-    await update.message.reply_text("🔄 Running schedule harvest now...")
+    await update.message.reply_text(
+        "🔄 Sweeping your airports first (quick), then every tail (slower).\n"
+        "The digest updates as soon as the airport sweep lands."
+    )
     context.application.create_task(
         _background_harvest(context.application, update.effective_chat.id)
     )
