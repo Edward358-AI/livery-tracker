@@ -39,6 +39,14 @@ LANDED_MAX_DIST_NM = 5.0
 DEPARTED_MIN_ALT_FT = 10_000
 DEPARTED_MIN_DIST_NM = 15.0
 
+# Signal-loss inference: ADS-B coverage is patchy near the ground, so aircraft
+# routinely vanish on short final. If we last saw the plane in a telling spot
+# and it stays dark this long, conclude the leg rather than polling forever.
+SILENT_GRACE = timedelta(minutes=6)          # ~3 missed polls
+APPROACH_MAX_ALT_FT = 4_000
+APPROACH_MAX_DIST_NM = 15.0
+LIVE_MAX_OVERRUN = timedelta(hours=3)        # hard cap: give up this long past schedule
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -86,12 +94,18 @@ async def job_refresh(context: ContextTypes.DEFAULT_TYPE) -> None:
     if event is None or event.status.terminal:
         return
 
-    updated = await asyncio.to_thread(schedule_provider.refresh_leg_time, event.tail, event)
-    if updated is not None:
-        drift_min = round((updated - event.scheduled_time).total_seconds() / 60)
+    result = await asyncio.to_thread(schedule_provider.refresh_leg_time, event.tail, event)
+    if result.cancelled:
+        event.status = EventState.CANCELLED
+        store.upsert(event)
+        await _digest(application).refresh()
+        log.info("Flight cancelled: %s", event.id)
+        return
+    if result.new_time is not None:
+        drift_min = round((result.new_time - event.scheduled_time).total_seconds() / 60)
         if abs(drift_min) >= 1:
             event.status_note = f"{'delayed' if drift_min > 0 else 'early'} {abs(drift_min)}m"
-        event.scheduled_time = updated
+        event.scheduled_time = result.new_time
     event.status = EventState.WAITING_LIVE
     store.upsert(event)
     await _digest(application).refresh()
@@ -126,12 +140,13 @@ async def job_poll(context: ContextTypes.DEFAULT_TYPE) -> None:
     now = _now()
 
     if telemetry is None:
-        if now > event.scheduled_time + LOST_TIMEOUT and event.last_telemetry.get("lat") is None:
-            event.status = EventState.LOST
+        outcome = _conclude_dark_leg(event, now)
+        if outcome is not None:
+            event.status, event.status_note = outcome
             store.upsert(event)
             await _digest(application).refresh()
             context.job.schedule_removal()
-            log.info("Tracking lost for %s", event.id)
+            log.info("Leg %s concluded without signal: %s", event.id, event.status.value)
         return
 
     dist_nm = None
@@ -143,6 +158,8 @@ async def job_poll(context: ContextTypes.DEFAULT_TYPE) -> None:
         "alt": telemetry.alt_ft,
         "gs": telemetry.gs_kts,
         "dist_nm": dist_nm,
+        "on_ground": telemetry.on_ground,
+        "seen_at": now.isoformat(),
     }
 
     finished = False
@@ -163,11 +180,56 @@ async def job_poll(context: ContextTypes.DEFAULT_TYPE) -> None:
             event.status_note = stamp
             finished = True
 
+    # Hard cap: don't chase a leg that never resolves (holding forever, bad data).
+    if not finished and now > event.scheduled_time + LIVE_MAX_OVERRUN:
+        event.status = EventState.LOST
+        event.status_note = "gave up waiting"
+        finished = True
+
     store.upsert(event)
     await _digest(application).refresh()
     if finished:
         context.job.schedule_removal()
         log.info("Leg %s finished: %s", event.id, event.status.value)
+
+
+def _conclude_dark_leg(event: FlightEvent, now: datetime) -> tuple[EventState, str] | None:
+    """Decide what a signal-less poll means for a LIVE leg, if anything yet.
+
+    Returns (state, note) to finish the leg, or None to keep polling.
+    """
+    last = event.last_telemetry
+    if last.get("lat") is None:
+        # Never saw the aircraft at all.
+        if now > event.scheduled_time + LOST_TIMEOUT:
+            return EventState.LOST, ""
+        return None
+
+    seen_at_raw = last.get("seen_at")
+    if not seen_at_raw:
+        return None
+    silent_for = now - datetime.fromisoformat(seen_at_raw)
+    if silent_for < SILENT_GRACE:
+        return None
+
+    stamp = fmt_local(now)
+    if event.type == EventType.ARRIVAL:
+        alt = last.get("alt")
+        dist = last.get("dist_nm")
+        on_approach = (
+            (last.get("on_ground") or (alt is not None and alt <= APPROACH_MAX_ALT_FT))
+            and dist is not None
+            and dist <= APPROACH_MAX_DIST_NM
+        )
+        if on_approach:
+            return EventState.LANDED, f"~{stamp} (signal lost on approach)"
+    else:
+        if not last.get("on_ground"):
+            return EventState.DEPARTED, f"~{stamp} (signal lost after takeoff)"
+
+    if now > event.scheduled_time + LIVE_MAX_OVERRUN:
+        return EventState.LOST, "signal lost"
+    return None
 
 
 # ---------------------------------------------------------------------------

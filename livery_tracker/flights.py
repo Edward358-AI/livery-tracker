@@ -22,11 +22,14 @@ class EventState(str, Enum):
     LIVE = "LIVE"                  # polling ADS-B every 120s
     LANDED = "LANDED"
     DEPARTED = "DEPARTED"
+    CANCELLED = "CANCELLED"        # source reported the flight cancelled
     LOST = "LOST"                  # no ADS-B data past deadline
 
     @property
     def terminal(self) -> bool:
-        return self in (EventState.LANDED, EventState.DEPARTED, EventState.LOST)
+        return self in (
+            EventState.LANDED, EventState.DEPARTED, EventState.CANCELLED, EventState.LOST
+        )
 
 
 @dataclass

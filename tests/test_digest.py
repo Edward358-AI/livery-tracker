@@ -76,6 +76,13 @@ def test_render_lost_state():
     assert "⚠️" in text and "tracking lost" in text
 
 
+def test_render_cancelled_state():
+    store = FlightStore()
+    store.upsert(make_event("x", EventType.ARRIVAL, EventState.CANCELLED))
+    text = render_digest(store, make_config())
+    assert "❌" in text and "cancelled" in text
+
+
 def test_flight_between_two_watched_airports_renders_as_one_line():
     dep_time = datetime(2026, 7, 26, 16, 0, tzinfo=timezone.utc)
     arr_time = datetime(2026, 7, 26, 17, 30, tzinfo=timezone.utc)

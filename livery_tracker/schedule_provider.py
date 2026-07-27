@@ -12,6 +12,7 @@ import logging
 import random
 import re
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -148,11 +149,22 @@ def rows_to_events(
     return events
 
 
-def refresh_leg_time(reg: str, event: FlightEvent) -> datetime | None:
-    """T-2h re-scrape: current best ETA/ETD for an existing leg, or None."""
+def row_is_cancelled(row: dict[str, Any]) -> bool:
+    status = (((row.get("status") or {}).get("generic")) or {}).get("status") or {}
+    return "cancel" in str(status.get("text", "")).lower()
+
+
+@dataclass
+class LegRefresh:
+    new_time: datetime | None
+    cancelled: bool = False
+
+
+def refresh_leg_time(reg: str, event: FlightEvent) -> LegRefresh:
+    """T-2h re-scrape: current best ETA/ETD (and cancellation flag) for a leg."""
     rows = fetch_flight_list(reg)
     key = "arrival" if event.type == EventType.ARRIVAL else "departure"
-    best: tuple[float, datetime] | None = None
+    best: tuple[float, datetime, dict[str, Any]] | None = None
     for row in rows:
         airport = row.get("airport") or {}
         origin = (((airport.get("origin") or {}).get("code")) or {}).get("iata", "") or ""
@@ -166,8 +178,10 @@ def refresh_leg_time(reg: str, event: FlightEvent) -> datetime | None:
             continue
         drift = abs((when - event.scheduled_time).total_seconds())
         if drift < 6 * 3600 and (best is None or drift < best[0]):
-            best = (drift, when)
-    return best[1] if best else None
+            best = (drift, when, row)
+    if best is None:
+        return LegRefresh(None)
+    return LegRefresh(best[1], cancelled=row_is_cancelled(best[2]))
 
 
 # ---------------------------------------------------------------------------
