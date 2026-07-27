@@ -14,8 +14,11 @@ ADSBDB_N8710M = {
             "type": "737MAX 8",
             "icao_type": "B38M",
             "manufacturer": "Boeing",
+            "mode_s": "ABFC71",
             "registration": "N8710M",
             "registered_owner": "Southwest Airlines",
+            "registered_owner_country_name": "United States",
+            "registered_owner_operator_flag_code": "SWA",
             "url_photo": None,
         }
     }
@@ -51,6 +54,11 @@ def test_adsbdb_aircraft_parses_registry(monkeypatch):
     assert _adsbdb_aircraft("N8710M") == {
         "airline": "Southwest Airlines",
         "model": "Boeing 737MAX 8",
+        "type_code": "B38M",
+        "manufacturer": "Boeing",
+        "hex": "ABFC71",
+        "owner_country": "United States",
+        "operator_code": "SWA",
     }
 
 

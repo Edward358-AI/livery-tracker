@@ -195,6 +195,53 @@ def rows_to_events(
     return events
 
 
+def current_flight(rows: list[dict[str, Any]]) -> dict[str, str] | None:
+    """The flight FR24 currently marks live, if any.
+
+    Preferred over the adsbdb callsign lookup for "where is it going right
+    now", because community route databases lag real schedule changes.
+    """
+    for row in rows:
+        if not ((row.get("status") or {}).get("live")):
+            continue
+        airport = row.get("airport") or {}
+        origin = ((airport.get("origin") or {}).get("code")) or {}
+        dest = ((airport.get("destination") or {}).get("code")) or {}
+        return {
+            "flight_number": (((row.get("identification") or {}).get("number")) or {}).get("default") or "",
+            "origin": (origin.get("iata") or origin.get("icao") or "???").upper(),
+            "destination": (dest.get("iata") or dest.get("icao") or "???").upper(),
+        }
+    return None
+
+
+def upcoming_flights(
+    rows: list[dict[str, Any]], now: datetime | None = None, limit: int = 6
+) -> list[dict[str, Any]]:
+    """Flatten FR24 rows into the near-future itinerary shown by /info."""
+    now = now or datetime.now(timezone.utc)
+    flights: list[dict[str, Any]] = []
+    for row in rows:
+        departure = _leg_time(row, "departure")
+        arrival = _leg_time(row, "arrival")
+        when = departure or arrival
+        if when is None or not (now - timedelta(hours=2) <= when <= now + WINDOW_FUTURE):
+            continue
+        airport = row.get("airport") or {}
+        origin = ((airport.get("origin") or {}).get("code")) or {}
+        dest = ((airport.get("destination") or {}).get("code")) or {}
+        flights.append({
+            "flight_number": (((row.get("identification") or {}).get("number")) or {}).get("default") or "",
+            "origin": (origin.get("iata") or origin.get("icao") or "???").upper(),
+            "destination": (dest.get("iata") or dest.get("icao") or "???").upper(),
+            "departure": departure,
+            "arrival": arrival,
+            "cancelled": row_is_cancelled(row),
+        })
+    flights.sort(key=lambda f: f["departure"] or f["arrival"])
+    return flights[:limit]
+
+
 def row_is_cancelled(row: dict[str, Any]) -> bool:
     status = (((row.get("status") or {}).get("generic")) or {}).get("status") or {}
     return "cancel" in str(status.get("text", "")).lower()

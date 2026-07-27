@@ -19,6 +19,7 @@ log = logging.getLogger(__name__)
 
 BOT_COMMANDS = [
     BotCommand("add", "Watch a tail number"),
+    BotCommand("info", "Full dossier for a registration"),
     BotCommand("remove", "Stop watching a tail"),
     BotCommand("watchlist", "Show watched aircraft"),
     BotCommand("airports", "Show target airports"),

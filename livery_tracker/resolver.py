@@ -43,17 +43,36 @@ def _adsbdb_aircraft(reg: str) -> dict[str, str]:
             (aircraft.get("type") or "").strip(),
         ) if part
     )
-    return {"airline": airline, "model": model}
+    return {
+        "airline": airline,
+        "model": model,
+        "type_code": (aircraft.get("icao_type") or "").strip(),
+        "manufacturer": (aircraft.get("manufacturer") or "").strip().title(),
+        "hex": (aircraft.get("mode_s") or "").strip().upper(),
+        "owner_country": (aircraft.get("registered_owner_country_name") or "").strip(),
+        "operator_code": (aircraft.get("registered_owner_operator_flag_code") or "").strip(),
+    }
 
 
-def resolve_aircraft(reg: str) -> dict[str, Any]:
-    """Best-effort airline/model/livery/photo lookup for a registration."""
+def resolve_aircraft(reg: str, full: bool = False) -> dict[str, Any]:
+    """Best-effort metadata for a registration.
+
+    `full=True` also queries the registry and the live network for the extra
+    detail /info shows (hex, build year, country) even when airline and model
+    already resolved — /add keeps the cheaper default path.
+    """
     info: dict[str, Any] = {
         "airline": "Unknown airline",
         "model": "Unknown type",
         "livery": "",
         "thumbnail": "",
         "photo_link": "",
+        "type_code": "",
+        "manufacturer": "",
+        "hex": "",
+        "year": None,
+        "owner_country": "",
+        "operator_code": "",
     }
 
     body = get_json(PLANESPOTTERS_URL.format(reg=reg))
@@ -71,22 +90,47 @@ def resolve_aircraft(reg: str) -> dict[str, Any]:
         info["model"] = meta["model"]
     if meta["livery"]:
         info["livery"] = meta["livery"]
+    for row in rows:
+        aircraft = row.get("aircraft") or {}
+        if not info["hex"] and aircraft.get("hex"):
+            info["hex"] = str(aircraft["hex"]).upper()
+        if not info["type_code"]:
+            info["type_code"] = ((aircraft.get("model") or {}).get("code") or "").strip()
+        if not info["owner_country"]:
+            info["owner_country"] = ((aircraft.get("country") or {}).get("name") or "").strip()
+        if info["hex"] and info["type_code"]:
+            break
 
-    # Static registry — fills in aircraft that are parked or rarely tracked.
-    if info["airline"] == "Unknown airline" or info["model"] == "Unknown type":
+    # Static registry — resolves aircraft that are parked or rarely tracked.
+    incomplete = info["airline"] == "Unknown airline" or info["model"] == "Unknown type"
+    if incomplete or full:
         registry = _adsbdb_aircraft(reg)
         if info["airline"] == "Unknown airline" and registry.get("airline"):
             info["airline"] = registry["airline"]
         if info["model"] == "Unknown type" and registry.get("model"):
             info["model"] = registry["model"]
+        for key in ("type_code", "manufacturer", "hex", "owner_country", "operator_code"):
+            if not info[key] and registry.get(key):
+                info[key] = registry[key]
 
-    if info["airline"] == "Unknown airline" or info["model"] == "Unknown type":
+    # Live transponder — the only free source of the build year, so grab it
+    # opportunistically whenever the aircraft happens to be transmitting.
+    incomplete = info["airline"] == "Unknown airline" or info["model"] == "Unknown type"
+    if incomplete or full:
         body = get_json(ADSBFI_URL.format(reg=reg))
         for ac in (body or {}).get("ac") or []:
             if info["model"] == "Unknown type" and ac.get("desc"):
                 info["model"] = str(ac["desc"]).title()
             if info["airline"] == "Unknown airline" and ac.get("ownOp"):
                 info["airline"] = str(ac["ownOp"]).title()
+            if not info["type_code"] and ac.get("t"):
+                info["type_code"] = str(ac["t"]).strip()
+            if not info["hex"] and ac.get("hex"):
+                info["hex"] = str(ac["hex"]).upper()
+            try:
+                info["year"] = int(str(ac.get("year")))
+            except (TypeError, ValueError):
+                pass
             break
 
     return info

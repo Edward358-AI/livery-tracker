@@ -181,6 +181,7 @@ On first run you'll be asked for:
 | Command | What it does |
 |---|---|
 | `/add <tail>` | Watch a registration — livery/photo auto-resolved, schedule harvested right away |
+| `/info <tail>` | Full dossier for any aircraft (watched or not) — see below. `/query` also works |
 | `/remove <tail>` | Stop watching (pending legs drop out of the digest) |
 | `/watchlist` | Show watched aircraft |
 | `/addairport <code>` | Add a target airport by IATA/ICAO code — triggers a full re-harvest |
@@ -191,6 +192,40 @@ On first run you'll be asked for:
 | `/view` | Show the digest layout; `/view type\|airport\|airline` changes it |
 | `/version` | Running version + whether a newer release exists |
 | `/update` | Install the latest release now and restart |
+
+## Looking up an aircraft — `/info`
+
+`/info N559AS` returns everything known about a registration, whether or not
+it's on your watchlist: the aircraft itself, where it is this second, anything
+the tracker is already following today, and its next 24 hours.
+
+```
+🔎 N559AS — Alaska Airlines
+“Xáat Kwáani”
+
+📋 Aircraft
+• Type: Boeing 737-890 (B738)
+• Built: 2006 (20 years old)
+• Mode S / ICAO hex: A720EB
+• Registered in: United States
+• Photo on Planespotters
+
+📡 Right now
+• ✈️ Airborne at 38,000 ft · 438 kts
+• Nearest airport: NGF (35 NM away)
+• Flying AS237: SEA ➔ LIH
+
+📅 Upcoming
+⭐ • LIH➔SEA AS213 — Mon 1:28 AM PDT
+• SEA➔BOS AS306 — Mon 8:23 AM PDT
+⭐ touches one of your airports
+```
+
+Aircraft facts are cached in `data/aircraft_cache.json` and **accumulate over
+time**: the build year, for example, is only published while an aircraft is
+transmitting, so the first `/info` run that catches it airborne records the
+year permanently. Position and schedules are always fetched live. Add
+`/info <tail> refresh` to force a re-fetch of the cached facts.
 
 ## Reading the digest
 
@@ -277,6 +312,7 @@ a real departure at one end and a real arrival at the other.
 | `flights_today.json` | Today's tracked legs and their states (crash recovery) |
 | `digest_state.json` | Today's digest message id (for in-place edits) |
 | `schedule_cache.json` | Cached schedule per tail (12h outage buffer) |
+| `aircraft_cache.json` | Accumulated aircraft facts for `/info` (type, hex, build year) |
 | `history.jsonl` | Every concluded leg with final telemetry — audit/tuning log |
 | `airports.csv` | Cached OurAirports database (~9 MB, refreshed every 90 days) |
 

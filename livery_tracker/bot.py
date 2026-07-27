@@ -11,6 +11,7 @@ from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, ContextTypes, filters
 
 from . import __version__
+from . import aircraft as aircraft_db
 from . import airports as airport_db
 from . import tracker, updater
 from .config import Config
@@ -25,6 +26,7 @@ HELP_TEXT = """<b>✈️ Livery Tracker Commands</b>
 /add &lt;tail&gt; — watch a registration (livery auto-resolved)
 /remove &lt;tail&gt; — stop watching
 /watchlist — show watched aircraft
+/info &lt;tail&gt; — full dossier: aircraft details, live position, schedule
 
 <b>Airports</b>
 /airports — show target airports
@@ -98,6 +100,7 @@ async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "added_at": datetime.now(timezone.utc).isoformat(),
     }
     config.save()
+    aircraft_db.record_profile(tail, info)  # seed the /info dossier cache
     livery = f'\n• Livery: <b>{info["livery"]}</b>' if info["livery"] else ""
     caption = (
         f"✅ Now watching <b>{tail}</b>\n"
@@ -116,6 +119,40 @@ async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Pull today's schedule for the new tail right away so the digest reflects it.
     context.application.create_task(
         _background_harvest(context.application, update.effective_chat.id, tail=tail)
+    )
+
+
+async def cmd_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Full dossier for any registration — watched or not."""
+    if not context.args:
+        await update.message.reply_text("Usage: /info <tail>  e.g. /info N265AK")
+        return
+    tail = context.args[0].upper()
+    refresh = len(context.args) > 1 and context.args[1].lower() in ("refresh", "-r")
+
+    notice = await update.message.reply_text(f"🔎 Looking up {tail}...")
+    report, thumbnail = await asyncio.to_thread(
+        aircraft_db.build_report,
+        tail,
+        _config(context),
+        context.application.bot_data["store"],
+        refresh,
+    )
+    try:
+        await notice.delete()
+    except Exception:  # noqa: BLE001 - cosmetic only
+        pass
+
+    if thumbnail:
+        try:
+            await update.message.reply_photo(
+                photo=thumbnail, caption=report, parse_mode=ParseMode.HTML
+            )
+            return
+        except Exception:  # noqa: BLE001 - caption too long, or photo unreachable
+            pass
+    await update.message.reply_text(
+        report, parse_mode=ParseMode.HTML, disable_web_page_preview=True
     )
 
 
@@ -325,6 +362,8 @@ def register_handlers(application: Application, chat_id: int) -> None:
         ("start", cmd_help),
         ("help", cmd_help),
         ("add", cmd_add),
+        ("info", cmd_info),
+        ("query", cmd_info),  # alias
         ("remove", cmd_remove),
         ("watchlist", cmd_watchlist),
         ("airports", cmd_airports),
