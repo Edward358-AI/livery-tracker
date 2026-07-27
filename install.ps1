@@ -73,9 +73,8 @@ Expand-Archive -Path $zipPath -DestinationPath $tmp
 $srcRoot = Get-ChildItem -Path $tmp -Directory | Select-Object -First 1
 
 # --- 3. Copy code into place (state in data\ and .env is never touched) ------
-# Stop a running instance first so files aren't in use.
+# Stop a running installer-managed instance first so files aren't in use.
 try { Stop-ScheduledTask -TaskName "LiveryTracker" -ErrorAction Stop } catch {}
-try { & nssm stop livery-tracker 2>$null } catch {}
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 $codeItems = @("livery_tracker", "requirements.txt", "runner.ps1", "runner.sh",

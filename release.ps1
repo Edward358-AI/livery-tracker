@@ -8,8 +8,11 @@ $ErrorActionPreference = "Stop"
 if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw "Version must look like 1.2.0" }
 
 $init = Join-Path $PSScriptRoot "livery_tracker\__init__.py"
-(Get-Content $init) -replace '__version__ = ".*"', "__version__ = `"$Version`"" |
-    Set-Content $init -Encoding utf8
+# Read/write as UTF-8 explicitly: PS 5.1's default read encoding is ANSI and
+# silently corrupts non-ASCII characters.
+$content = [System.IO.File]::ReadAllText($init)
+$content = $content -replace '__version__ = ".*"', "__version__ = `"$Version`""
+[System.IO.File]::WriteAllText($init, $content, (New-Object System.Text.UTF8Encoding($false)))
 
 & (Join-Path $PSScriptRoot ".venv\Scripts\python.exe") -m pytest tests/ -q
 if ($LASTEXITCODE -ne 0) { throw "Tests failed - not releasing." }
