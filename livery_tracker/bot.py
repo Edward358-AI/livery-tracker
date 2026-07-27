@@ -15,7 +15,7 @@ from . import aircraft as aircraft_db
 from . import airports as airport_db
 from . import tracker, updater
 from .config import Config
-from .digest import DEFAULT_GROUP_MODE, GROUP_MODES, format_leg
+from .digest import DEFAULT_GROUP_MODE, GROUP_MODES, SAFE_LIMIT, format_leg, telegram_length
 from .resolver import resolve_aircraft
 from .throttle import Cooldown
 
@@ -78,6 +78,57 @@ def _config(context: ContextTypes.DEFAULT_TYPE) -> Config:
 
 
 MAX_LISTED_LEGS = 15  # keeps the reply inside Telegram's message limit
+
+
+def _split_message(text: str, limit: int = SAFE_LIMIT) -> list[str]:
+    """Split text into UTF-16-safe Telegram parts without losing characters."""
+    if telegram_length(text) <= limit:
+        return [text]
+
+    parts: list[str] = []
+    current = ""
+    for line in text.splitlines(keepends=True):
+        if telegram_length(line) > limit:
+            if current:
+                parts.append(current)
+                current = ""
+            chunk = ""
+            chunk_length = 0
+            for char in line:
+                char_length = telegram_length(char)
+                if chunk and chunk_length + char_length > limit:
+                    parts.append(chunk)
+                    chunk = ""
+                    chunk_length = 0
+                chunk += char
+                chunk_length += char_length
+            if chunk:
+                parts.append(chunk)
+            continue
+
+        if current and telegram_length(current + line) > limit:
+            parts.append(current)
+            current = ""
+        current += line
+    if current:
+        parts.append(current)
+    return parts or [""]
+
+
+async def _reply_parts(message, text: str, *, parse_mode=None, limit: int = SAFE_LIMIT, **kwargs) -> None:
+    """Reply with one or more Telegram-safe messages."""
+    for part in _split_message(text, limit):
+        await message.reply_text(part, parse_mode=parse_mode, **kwargs)
+
+
+def _watchlist_text(config: Config) -> str:
+    """Render the full watchlist; transport limits are handled by _reply_parts."""
+    header = "<b>👀 Watched aircraft</b>"
+    lines = [header]
+    for tail, info in sorted(config.watchlist.items()):
+        livery = f' — "{info["livery"]}"' if info.get("livery") else ""
+        lines.append(f"• <b>{tail}</b> ({info.get('airline', '?')}, {info.get('model', '?')}){livery}")
+    return "\n".join(lines)
 
 
 def _describe_new_legs(events) -> str:
@@ -258,11 +309,7 @@ async def cmd_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not config.watchlist:
         await update.message.reply_text("Watchlist is empty. Add a tail with /add <tail>.")
         return
-    lines = ["<b>👀 Watched aircraft</b>"]
-    for tail, info in sorted(config.watchlist.items()):
-        livery = f' — "{info["livery"]}"' if info.get("livery") else ""
-        lines.append(f"• <b>{tail}</b> ({info.get('airline', '?')}, {info.get('model', '?')}){livery}")
-    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+    await _reply_parts(update.message, _watchlist_text(config), parse_mode=ParseMode.HTML)
 
 
 async def cmd_airports(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

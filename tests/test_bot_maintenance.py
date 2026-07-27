@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from livery_tracker import bot
+from livery_tracker.config import Config
+from livery_tracker.digest import TELEGRAM_LIMIT, telegram_length
 from livery_tracker.flights import EventType, FlightEvent
 
 
@@ -54,3 +56,44 @@ def test_dropflight_requires_tail_and_flight_number():
 
 def test_help_documents_dropflight_maintenance_command():
     assert "/dropflight &lt;tail&gt; &lt;flight&gt;" in bot.HELP_TEXT
+
+
+def test_watchlist_splits_large_fleet_into_telegram_safe_messages():
+    config = Config()
+    config.watchlist = {
+        f"N{i:05d}AA": {
+            "airline": "Example Airlines International",
+            "model": "Boeing 737-900ER",
+            "livery": "A Very Long Special Commemorative Livery Name",
+        }
+        for i in range(77)
+    }
+    message = FakeMessage()
+    update = SimpleNamespace(message=message)
+    context = SimpleNamespace(application=SimpleNamespace(bot_data={"config": config}))
+
+    asyncio.run(bot.cmd_watchlist(update, context))
+
+    assert len(message.replies) > 1
+    assert all(telegram_length(part) <= TELEGRAM_LIMIT for part in message.replies)
+    combined = "\n".join(message.replies)
+    assert all(tail in combined for tail in config.watchlist)
+
+
+def test_split_message_preserves_large_line_list_within_telegram_limit():
+    text = "\n".join(f"• N{i:05d}AA — " + "x" * 80 for i in range(77))
+
+    parts = bot._split_message(text)
+
+    assert len(parts) > 1
+    assert all(telegram_length(part) <= TELEGRAM_LIMIT for part in parts)
+    assert "".join(part.replace("\n", "") for part in parts) == text.replace("\n", "")
+
+
+def test_split_message_breaks_one_pathological_line():
+    text = "x" * 5000
+
+    parts = bot._split_message(text)
+
+    assert all(telegram_length(part) <= TELEGRAM_LIMIT for part in parts)
+    assert "".join(parts) == text
