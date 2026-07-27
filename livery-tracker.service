@@ -8,7 +8,7 @@ Type=simple
 User=__USER__
 WorkingDirectory=__WORKDIR__
 ExecStart=__WORKDIR__/.venv/bin/python -m livery_tracker
-Restart=on-failure
+Restart=always
 RestartSec=10
 
 [Install]

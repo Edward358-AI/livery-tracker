@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, time as dt_time
 
 from telegram import Bot, BotCommand
-from telegram.ext import Application
+from telegram.ext import Application, ContextTypes
 
 from . import bot as bot_module
-from . import tracker
+from . import tracker, updater
 from .config import Config, Credentials, harvest_time
 from .digest import DigestManager
 from .flights import FlightStore
@@ -25,8 +26,24 @@ BOT_COMMANDS = [
     BotCommand("rmairport", "Remove a target airport"),
     BotCommand("status", "Tracker status"),
     BotCommand("refresh", "Run schedule harvest now"),
+    BotCommand("version", "Version + update check"),
+    BotCommand("update", "Install the latest release"),
     BotCommand("help", "Show help"),
 ]
+
+
+async def job_update_check(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Daily self-update: if a newer release exists, install it and restart."""
+    application = context.application
+    if not updater.auto_update_enabled():
+        return
+    available = await asyncio.to_thread(updater.check_for_update)
+    if available is None:
+        return
+    log.info("Auto-update: %s is available", available.tag)
+    await bot_module.apply_update_and_restart(
+        application, application.bot_data["chat_id"], available
+    )
 
 
 async def _post_init(application: Application) -> None:
@@ -68,14 +85,21 @@ def build_application(creds: Credentials) -> Application:
         time=dt_time(hour=hour, minute=minute, tzinfo=local_tz),
         name="daily_harvest",
     )
+    application.job_queue.run_daily(
+        job_update_check,
+        time=dt_time(hour=4, minute=0, tzinfo=local_tz),
+        name="update_check",
+    )
     log.info("Daily harvest scheduled for %02d:%02d local time", hour, minute)
     return application
 
 
-def run(creds: Credentials) -> None:
-    """Run the bot until interrupted (long polling)."""
+def run(creds: Credentials) -> int:
+    """Run the bot until interrupted. Returns the process exit code —
+    RESTART_EXIT_CODE (42) means "please restart me" after a self-update."""
     application = build_application(creds)
     application.run_polling(allowed_updates=["message"])
+    return application.bot_data.get("exit_code", 0)
 
 
 async def harvest_once(creds: Credentials) -> int:

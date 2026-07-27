@@ -20,6 +20,9 @@ def main() -> None:
     parser.add_argument(
         "--harvest-now", action="store_true", help="run one schedule harvest and exit"
     )
+    parser.add_argument(
+        "--update", action="store_true", help="check for and install the latest release"
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -30,6 +33,21 @@ def main() -> None:
 
     if args.setup:
         run_wizard()
+        return
+
+    if args.update:
+        from . import __version__, updater
+
+        available = updater.check_for_update()
+        if available is None:
+            print(f"Already up to date (v{__version__}).")
+            return
+        print(f"Updating v{__version__} -> {available.tag} ...")
+        if updater.apply_update(available):
+            print("Update installed. Restart the tracker to run the new version.")
+        else:
+            print("Update failed — current version left untouched (see log output).")
+            sys.exit(1)
         return
 
     creds = load_credentials()
@@ -47,7 +65,9 @@ def main() -> None:
         print(f"Harvest finished: {count} new flight leg(s).")
         return
 
-    run(creds)
+    # Exit code 42 tells the supervisor (runner script / NSSM / systemd)
+    # to start us again — used after a self-update installs new code.
+    sys.exit(run(creds))
 
 
 if __name__ == "__main__":

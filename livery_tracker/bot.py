@@ -10,8 +10,9 @@ from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, ContextTypes, filters
 
+from . import __version__
 from . import airports as airport_db
-from . import tracker
+from . import tracker, updater
 from .config import Config
 from .resolver import resolve_aircraft
 
@@ -32,6 +33,8 @@ HELP_TEXT = """<b>✈️ Livery Tracker Commands</b>
 <b>Tracking</b>
 /refresh — re-run today's schedule harvest now
 /status — tracker status
+/version — running version + update check
+/update — install the latest release now
 /help — this message
 
 Today's flights live in your digest bot's chat — one message per day,
@@ -219,6 +222,52 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
 
+async def apply_update_and_restart(application, chat_id: int, available) -> None:
+    """Install a release and ask the supervisor to restart us (exit code 42)."""
+    await application.bot.send_message(chat_id, f"⬇️ Updating to {available.tag}...")
+    ok = await asyncio.to_thread(updater.apply_update, available)
+    if ok:
+        await application.bot.send_message(
+            chat_id, f"✅ Updated to {available.tag} — restarting now."
+        )
+        application.bot_data["exit_code"] = updater.RESTART_EXIT_CODE
+        application.stop_running()
+    else:
+        await application.bot.send_message(
+            chat_id, "❌ Update failed — kept the current version. Check the logs."
+        )
+
+
+async def cmd_version(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    lines = [f"🏷 Livery Tracker v{__version__}"]
+    if not updater.auto_update_enabled():
+        lines.append("Auto-update: off (git checkout, Docker, or LT_AUTO_UPDATE=0)")
+    else:
+        lines.append("Auto-update: on (checks daily at 4:00 AM)")
+        available = await asyncio.to_thread(updater.check_for_update)
+        lines.append(
+            f"Newer release available: {available.tag} — send /update to install"
+            if available else "You are on the latest release."
+        )
+    await update.message.reply_text("\n".join(lines))
+
+
+async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not updater.auto_update_enabled():
+        await update.message.reply_text(
+            "Updates are managed outside the bot for this install "
+            "(git checkout, Docker, or LT_AUTO_UPDATE=0)."
+        )
+        return
+    available = await asyncio.to_thread(updater.check_for_update)
+    if available is None:
+        await update.message.reply_text(f"Already up to date (v{__version__}).")
+        return
+    await apply_update_and_restart(
+        context.application, update.effective_chat.id, available
+    )
+
+
 async def cmd_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("🔄 Running schedule harvest now...")
     context.application.create_task(
@@ -240,5 +289,7 @@ def register_handlers(application: Application, chat_id: int) -> None:
         ("rmairport", cmd_rmairport),
         ("status", cmd_status),
         ("refresh", cmd_refresh),
+        ("version", cmd_version),
+        ("update", cmd_update),
     ]:
         application.add_handler(CommandHandler(command, handler, filters=owner))

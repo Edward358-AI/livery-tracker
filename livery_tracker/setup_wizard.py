@@ -40,7 +40,12 @@ def _api(token: str, method: str, **params) -> dict | None:
 
 def _prompt_token() -> str:
     print("\nStep 1/4 — Telegram bot token")
-    print("  Create a bot with @BotFather in Telegram (/newbot) and paste its token here.")
+    print("  In Telegram:")
+    print("   1. Search for @BotFather (blue checkmark) and open it")
+    print("   2. Send /newbot")
+    print("   3. Pick any display name (e.g. 'My Livery Tracker')")
+    print("   4. Pick a username ending in 'bot' (e.g. mylivery_bot)")
+    print("   5. BotFather replies with a token like 1234567:AAxxxx... — paste it below")
     while True:
         token = input("  Bot token: ").strip()
         if not token:
@@ -82,8 +87,10 @@ def _capture_chat_id(token: str) -> int:
 def _prompt_digest_bot(chat_id: int) -> str:
     print("\nStep 3/4 — Digest bot")
     print("  A SECOND bot owns the once-a-day flight digest message, keeping your")
-    print("  command chat completely clean. Create another bot with @BotFather")
-    print("  (/newbot again) and paste its token here.")
+    print("  command chat completely clean. Back in @BotFather:")
+    print("   1. Send /newbot again")
+    print("   2. Name it something like 'My Livery Digest' (username e.g. mylivery_digest_bot)")
+    print("   3. Paste the new token below")
     while True:
         token = input("  Digest bot token: ").strip()
         if not token:

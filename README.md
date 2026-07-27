@@ -29,54 +29,79 @@ from [OurAirports](https://ourairports.com).
 5. **Crash-safe** — all state lives in `data/*.json`; on restart the tracker resumes
    every pending flight exactly where it left off.
 
-## Quick start
+## Quick start — one line, no git, no Docker
 
-### Option A — Docker
+**Windows** (paste into PowerShell):
 
-Prereqs: [Docker Desktop](https://www.docker.com/products/docker-desktop/) or Docker Engine.
+```powershell
+iwr -useb https://raw.githubusercontent.com/Edward358-AI/livery-tracker/main/install.ps1 | iex
+```
+
+**Linux / macOS / Raspberry Pi** (paste into a terminal):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Edward358-AI/livery-tracker/main/install.sh | bash
+```
+
+The installer finds (or installs) Python, downloads the latest release, walks you
+through the Telegram setup wizard, and registers the tracker to start
+automatically at login — no admin rights needed. Then it **keeps itself
+updated**: every night at 4 AM it checks for a new release and installs it,
+telling you in Telegram when it does. `/version` shows what you're running,
+`/update` upgrades on the spot. You never touch git.
+
+Re-running the install line upgrades an existing install in place — your
+watchlist, airports, and bot tokens are never touched.
+
+<details>
+<summary><b>Advanced installs — git checkout, Docker, system services</b></summary>
+
+### Git checkout (developers)
 
 ```bash
 git clone https://github.com/Edward358-AI/livery-tracker.git
 cd livery-tracker
+python -m venv .venv
+.venv/Scripts/pip install -r requirements.txt      # (bin/pip on Unix)
+.venv/Scripts/python -m livery_tracker --setup
+.venv/Scripts/python -m livery_tracker
+```
+
+Auto-update disables itself in a git checkout (you pull instead), in Docker
+(rebuild the image), and wherever `LT_AUTO_UPDATE=0` is set.
+
+### Docker
+
+```bash
 docker compose build
-docker compose run --rm livery-tracker python -m livery_tracker --setup   # interactive wizard
+docker compose run --rm livery-tracker python -m livery_tracker --setup
 docker compose up -d
 ```
 
-The container auto-restarts with your machine (`restart: unless-stopped`).
-Logs: `docker compose logs -f`
+### System services (always-on boxes)
 
-### Option B — Linux / macOS / Raspberry Pi (no Docker)
+- **Linux**: the one-line installer already sets up a sudo-free `systemd --user`
+  unit; for a system-wide unit on a headless box use `./tracker.sh install-service`.
+- **Windows always-on** (runs with nobody logged in): install
+  [NSSM](https://nssm.cc) (`winget install NSSM.NSSM`), then from an **admin**
+  PowerShell run `install-service.ps1` from the install folder. Uninstall with
+  `install-service.ps1 -Uninstall`. Logs go to `tracker.log`.
+- `tracker.sh setup | start | stop | status | logs` also works for manual
+  background running on Linux/macOS.
 
-```bash
-git clone https://github.com/Edward358-AI/livery-tracker.git
-cd livery-tracker
-./tracker.sh setup    # creates venv, installs deps, runs the wizard
-./tracker.sh start    # runs in the background
-```
+### Publishing a release (repo owner)
 
-Also available: `./tracker.sh stop | status | logs`, and on a 24/7 Linux box
-`./tracker.sh install-service` installs a systemd unit that starts on boot.
-
-### Option C — Windows (no Docker needed)
-
-```powershell
-python -m venv .venv
-.venv\Scripts\pip install -r requirements.txt
-.venv\Scripts\python -m livery_tracker --setup   # interactive wizard
-.venv\Scripts\python -m livery_tracker           # run in this terminal
-```
-
-To run it 24/7 as a real Windows service (auto-start on boot, auto-restart on
-crash), install [NSSM](https://nssm.cc) and use the bundled installer from an
-**admin** PowerShell:
+Friends' trackers only ever auto-install **published releases**, never raw
+commits — cutting a release is the "this is stable" gate:
 
 ```powershell
-winget install NSSM.NSSM     # then open a NEW admin PowerShell
-powershell -ExecutionPolicy Bypass -File install-service.ps1 # replace this with the actual PATH to the file
+.\release.ps1 1.2.0
 ```
 
-Uninstall with `install-service.ps1 -Uninstall`. Logs go to `tracker.log`.
+That bumps `__version__`, runs the tests, commits, tags, pushes, and creates the
+GitHub release. Everyone's tracker picks it up within a day.
+
+</details>
 
 ## The setup wizard
 
@@ -102,6 +127,8 @@ On first run you'll be asked for:
 | `/airports` | List target airports |
 | `/refresh` | Re-run today's schedule harvest right now |
 | `/status` | Watchlist size, airports, active flight legs |
+| `/version` | Running version + whether a newer release exists |
+| `/update` | Install the latest release now and restart |
 
 ## Reading the digest
 
@@ -174,6 +201,7 @@ Updated 7:57 PM PDT
 | `DIGEST_BOT_TOKEN` | — | Second bot that owns the daily digest message |
 | `HARVEST_TIME` | `06:00` | Local time of the daily schedule harvest |
 | `LT_DATA_DIR` | `./data` | Where runtime state lives |
+| `LT_AUTO_UPDATE` | `1` | Set to `0` to disable the nightly self-update check |
 
 ## Notes on data sources & resilience
 
