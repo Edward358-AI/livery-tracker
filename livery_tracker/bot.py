@@ -34,7 +34,8 @@ async def _rate_limited(update: Update, name: str) -> bool:
     wait = COOLDOWNS[name].remaining(update.effective_chat.id)
     if wait <= 0:
         return False
-    await update.message.reply_text(
+    await _reply_parts(
+        update.message,
         f"⏳ Easy there — /{name} again in {wait:.0f}s "
         "(keeps us polite to the free data sources)."
     )
@@ -78,6 +79,7 @@ def _config(context: ContextTypes.DEFAULT_TYPE) -> Config:
 
 
 MAX_LISTED_LEGS = 15  # keeps the reply inside Telegram's message limit
+TELEGRAM_CAPTION_LIMIT = 1024
 
 
 def _split_message(text: str, limit: int = SAFE_LIMIT) -> list[str]:
@@ -115,10 +117,30 @@ def _split_message(text: str, limit: int = SAFE_LIMIT) -> list[str]:
     return parts or [""]
 
 
-async def _reply_parts(message, text: str, *, parse_mode=None, limit: int = SAFE_LIMIT, **kwargs) -> None:
+async def _reply_parts(message, text: str, *, parse_mode=None, limit: int = SAFE_LIMIT, **kwargs) -> list:
     """Reply with one or more Telegram-safe messages."""
+    replies = []
     for part in _split_message(text, limit):
-        await message.reply_text(part, parse_mode=parse_mode, **kwargs)
+        replies.append(await message.reply_text(part, parse_mode=parse_mode, **kwargs))
+    return replies
+
+
+async def _send_parts(bot, chat_id: int, text: str, *, parse_mode=None, limit: int = SAFE_LIMIT, **kwargs) -> None:
+    """Send one or more Telegram-safe messages without a source Message object."""
+    for part in _split_message(text, limit):
+        await bot.send_message(chat_id, part, parse_mode=parse_mode, **kwargs)
+
+
+async def _reply_photo_report(message, photo: str, report: str, *, parse_mode=None) -> None:
+    """Send a photo with a safe caption, continuing any overflow as text replies."""
+    caption_parts = _split_message(report, TELEGRAM_CAPTION_LIMIT)
+    try:
+        await message.reply_photo(photo=photo, caption=caption_parts[0], parse_mode=parse_mode)
+    except Exception:  # noqa: BLE001 - photo is optional; preserve the full report as text
+        await _reply_parts(message, report, parse_mode=parse_mode)
+        return
+    for part in caption_parts[1:]:
+        await _reply_parts(message, part, parse_mode=parse_mode)
 
 
 def _watchlist_text(config: Config) -> str:
@@ -172,8 +194,9 @@ async def _background_harvest(application, chat_id: int, tail: str | None = None
                 )
             else:
                 message = "📋 Harvest complete — nothing new since the last sweep."
-        await application.bot.send_message(
-            chat_id, message, parse_mode=ParseMode.HTML, disable_web_page_preview=True
+        await _send_parts(
+            application.bot, chat_id, message,
+            parse_mode=ParseMode.HTML, disable_web_page_preview=True,
         )
     except Exception:  # noqa: BLE001
         log.exception("Background harvest failed")
@@ -184,21 +207,21 @@ async def _background_harvest(application, chat_id: int, tail: str | None = None
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(HELP_TEXT, parse_mode=ParseMode.HTML)
+    await _reply_parts(update.message, HELP_TEXT, parse_mode=ParseMode.HTML)
 
 
 async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not context.args:
-        await update.message.reply_text("Usage: /add <tail>  e.g. /add N265AK")
+        await _reply_parts(update.message, "Usage: /add <tail>  e.g. /add N265AK")
         return
     tail = context.args[0].upper()
     config = _config(context)
     if tail in config.watchlist:
-        await update.message.reply_text(f"{tail} is already on the watchlist.")
+        await _reply_parts(update.message, f"{tail} is already on the watchlist.")
         return
     if await _rate_limited(update, "add"):
         return
-    await update.message.reply_text(f"🔎 Resolving {tail} via Planespotters/FR24...")
+    await _reply_parts(update.message, f"🔎 Resolving {tail} via Planespotters/FR24...")
     info = await asyncio.to_thread(resolve_aircraft, tail)
     config.watchlist[tail] = {
         "airline": info["airline"],
@@ -216,14 +239,11 @@ async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"• Type: {info['model']}{livery}"
     )
     if info["thumbnail"]:
-        try:
-            await update.message.reply_photo(
-                photo=info["thumbnail"], caption=caption, parse_mode=ParseMode.HTML
-            )
-        except Exception:  # noqa: BLE001 - thumbnail is nice-to-have
-            await update.message.reply_text(caption, parse_mode=ParseMode.HTML)
+        await _reply_photo_report(
+            update.message, info["thumbnail"], caption, parse_mode=ParseMode.HTML
+        )
     else:
-        await update.message.reply_text(caption, parse_mode=ParseMode.HTML)
+        await _reply_parts(update.message, caption, parse_mode=ParseMode.HTML)
     # Pull today's schedule for the new tail right away so the digest reflects it.
     context.application.create_task(
         _background_harvest(context.application, update.effective_chat.id, tail=tail)
@@ -233,14 +253,15 @@ async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Full dossier for any registration — watched or not."""
     if not context.args:
-        await update.message.reply_text("Usage: /info <tail>  e.g. /info N265AK")
+        await _reply_parts(update.message, "Usage: /info <tail>  e.g. /info N265AK")
         return
     if await _rate_limited(update, "info"):
         return
     tail = context.args[0].upper()
     refresh = len(context.args) > 1 and context.args[1].lower() in ("refresh", "-r")
 
-    notice = await update.message.reply_text(f"🔎 Looking up {tail}...")
+    notices = await _reply_parts(update.message, f"🔎 Looking up {tail}...")
+    notice = notices[-1] if notices else None
     report, thumbnail = await asyncio.to_thread(
         aircraft_db.build_report,
         tail,
@@ -254,31 +275,26 @@ async def cmd_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         pass
 
     if thumbnail:
-        try:
-            await update.message.reply_photo(
-                photo=thumbnail, caption=report, parse_mode=ParseMode.HTML
-            )
-            return
-        except Exception:  # noqa: BLE001 - caption too long, or photo unreachable
-            pass
-    await update.message.reply_text(
-        report, parse_mode=ParseMode.HTML, disable_web_page_preview=True
+        await _reply_photo_report(update.message, thumbnail, report, parse_mode=ParseMode.HTML)
+        return
+    await _reply_parts(
+        update.message, report, parse_mode=ParseMode.HTML, disable_web_page_preview=True
     )
 
 
 async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not context.args:
-        await update.message.reply_text("Usage: /remove <tail>")
+        await _reply_parts(update.message, "Usage: /remove <tail>")
         return
     tail = context.args[0].upper()
     config = _config(context)
     if config.watchlist.pop(tail, None) is None:
-        await update.message.reply_text(f"{tail} is not on the watchlist.")
+        await _reply_parts(update.message, f"{tail} is not on the watchlist.")
         return
     config.save()
     dropped = await tracker.purge_events(context.application, lambda ev: ev.tail == tail)
     note = f" ({dropped} pending leg(s) dropped from today's digest)" if dropped else ""
-    await update.message.reply_text(f"🗑 Removed {tail} from the watchlist.{note}")
+    await _reply_parts(update.message, f"🗑 Removed {tail} from the watchlist.{note}")
 
 
 async def cmd_dropflight(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -289,7 +305,7 @@ async def cmd_dropflight(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     assignment behind after an operational swap.
     """
     if len(context.args) != 2:
-        await update.message.reply_text("Usage: /dropflight <tail> <flight number>")
+        await _reply_parts(update.message, "Usage: /dropflight <tail> <flight number>")
         return
     tail, flight_number = (arg.upper() for arg in context.args)
     dropped = await tracker.purge_events(
@@ -297,17 +313,18 @@ async def cmd_dropflight(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         lambda ev: ev.tail == tail and ev.flight_number.upper() == flight_number,
     )
     if dropped:
-        await update.message.reply_text(
+        await _reply_parts(
+            update.message,
             f"Removed {dropped} stale leg(s) for {tail} {flight_number} from today's digest."
         )
     else:
-        await update.message.reply_text(f"No current leg found for {tail} {flight_number}.")
+        await _reply_parts(update.message, f"No current leg found for {tail} {flight_number}.")
 
 
 async def cmd_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     config = _config(context)
     if not config.watchlist:
-        await update.message.reply_text("Watchlist is empty. Add a tail with /add <tail>.")
+        await _reply_parts(update.message, "Watchlist is empty. Add a tail with /add <tail>.")
         return
     await _reply_parts(update.message, _watchlist_text(config), parse_mode=ParseMode.HTML)
 
@@ -315,7 +332,7 @@ async def cmd_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def cmd_airports(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     config = _config(context)
     if not config.target_airports:
-        await update.message.reply_text("No target airports. Add one with /addairport <code>.")
+        await _reply_parts(update.message, "No target airports. Add one with /addairport <code>.")
         return
     lines = ["<b>🛬 Target airports</b>"]
     for iata, info in sorted(config.target_airports.items()):
@@ -323,17 +340,18 @@ async def cmd_airports(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             f"• <b>{iata}</b> / {info.get('icao', '?')} — {info.get('name', '?')} "
             f"({info.get('lat'):.4f}, {info.get('lon'):.4f})"
         )
-    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+    await _reply_parts(update.message, "\n".join(lines), parse_mode=ParseMode.HTML)
 
 
 async def cmd_addairport(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not context.args:
-        await update.message.reply_text("Usage: /addairport <IATA or ICAO>  e.g. /addairport LAX")
+        await _reply_parts(update.message, "Usage: /addairport <IATA or ICAO>  e.g. /addairport LAX")
         return
     code = context.args[0].upper()
     airport = await asyncio.to_thread(airport_db.lookup, code)
     if airport is None:
-        await update.message.reply_text(
+        await _reply_parts(
+            update.message,
             f"❓ Couldn't find '{code}' in the airport database. "
             "Double-check the IATA/ICAO code."
         )
@@ -347,7 +365,8 @@ async def cmd_addairport(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "lon": airport.lon,
     }
     config.save()
-    await update.message.reply_text(
+    await _reply_parts(
+        update.message,
         f"✅ Added <b>{key}</b> ({airport.icao}) — {airport.name}\n"
         f"📍 {airport.lat:.4f}, {airport.lon:.4f}\n"
         "🔄 Re-harvesting today's schedules for the new airport...",
@@ -360,13 +379,13 @@ async def cmd_addairport(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def cmd_rmairport(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not context.args:
-        await update.message.reply_text("Usage: /rmairport <code>")
+        await _reply_parts(update.message, "Usage: /rmairport <code>")
         return
     code = context.args[0].upper()
     config = _config(context)
     match = config.airport_for_code(code)
     if match is None:
-        await update.message.reply_text(f"{code} is not a configured airport.")
+        await _reply_parts(update.message, f"{code} is not a configured airport.")
         return
     key = match[0]
     config.target_airports.pop(key)
@@ -375,7 +394,7 @@ async def cmd_rmairport(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         context.application, lambda ev: ev.target_airport == key
     )
     note = f" ({dropped} pending leg(s) dropped from today's digest)" if dropped else ""
-    await update.message.reply_text(f"🗑 Removed {key} from target airports.{note}")
+    await _reply_parts(update.message, f"🗑 Removed {key} from target airports.{note}")
 
 
 async def cmd_view(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -428,7 +447,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         lines.append(
             f"  – {ev.tail} {ev.type.value.lower()} @ {ev.target_airport} [{ev.status.value}]"
         )
-    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+    await _reply_parts(update.message, "\n".join(lines), parse_mode=ParseMode.HTML)
 
 
 async def apply_update_and_restart(application, chat_id: int, available) -> None:
