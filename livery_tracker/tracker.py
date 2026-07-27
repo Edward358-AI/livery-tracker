@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Callable
@@ -75,6 +76,19 @@ def _cancel_jobs(application: Application, event_id: str) -> None:
     for suffix in ("refresh", "live_start", "poll"):
         for job in application.job_queue.get_jobs_by_name(f"{event_id}:{suffix}"):
             job.schedule_removal()
+
+
+def _callsign_matches_flight(callsign: str | None, flight_number: str) -> bool:
+    """Whether live ADS-B telemetry belongs to this scheduled flight.
+
+    Airlines use their ICAO callsign in ADS-B (``SWA3043``) while schedules
+    normally show an IATA flight number (``WN3043``). The numeric suffix is
+    the stable part. If either side has no number, we cannot prove a mismatch
+    and leave the normal state machine alone.
+    """
+    seen = "".join(re.findall(r"\d+", callsign or "")).lstrip("0")
+    expected = "".join(re.findall(r"\d+", flight_number or "")).lstrip("0")
+    return not seen or not expected or seen == expected
 
 
 # ---------------------------------------------------------------------------
@@ -193,6 +207,25 @@ async def job_poll(context: ContextTypes.DEFAULT_TYPE) -> None:
             await _digest(application).refresh()
             context.job.schedule_removal()
             log.info("Leg %s concluded without signal: %s", event.id, event.status.value)
+        return
+
+    # A tail can have stale schedule assignments. Never use one aircraft's
+    # takeoff/landing to complete a different numbered flight — that was the
+    # cause of N8619F being shown as both WN3043 and WN4244 from one OAK
+    # departure. The mismatch is strong evidence the aircraft was swapped.
+    if not _callsign_matches_flight(telemetry.callsign, event.flight_number):
+        event.status = EventState.SWAPPED
+        event.status_note = f"aircraft operating {telemetry.callsign} instead"
+        store.upsert(event)
+        append_history(event)
+        await _digest(application).refresh()
+        context.job.schedule_removal()
+        log.info(
+            "Leg %s dropped: expected %s but ADS-B callsign is %s",
+            event.id,
+            event.flight_number,
+            telemetry.callsign,
+        )
         return
 
     dist_nm = None

@@ -49,6 +49,7 @@ HELP_TEXT = """<b>✈️ Livery Tracker Commands</b>
 /remove &lt;tail&gt; — stop watching
 /watchlist — show watched aircraft
 /info &lt;tail&gt; — full dossier: aircraft details, live position, schedule
+/dropflight &lt;tail&gt; &lt;flight&gt; — remove one stale flight assignment
 
 <b>Airports</b>
 /airports — show target airports
@@ -227,6 +228,29 @@ async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     dropped = await tracker.purge_events(context.application, lambda ev: ev.tail == tail)
     note = f" ({dropped} pending leg(s) dropped from today's digest)" if dropped else ""
     await update.message.reply_text(f"🗑 Removed {tail} from the watchlist.{note}")
+
+
+async def cmd_dropflight(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Remove one bad/stale flight assignment without unwatching its aircraft.
+
+    This is intentionally a maintenance command rather than a normal dashboard
+    control: it is useful when a public schedule source leaves a stale aircraft
+    assignment behind after an operational swap.
+    """
+    if len(context.args) != 2:
+        await update.message.reply_text("Usage: /dropflight <tail> <flight number>")
+        return
+    tail, flight_number = (arg.upper() for arg in context.args)
+    dropped = await tracker.purge_events(
+        context.application,
+        lambda ev: ev.tail == tail and ev.flight_number.upper() == flight_number,
+    )
+    if dropped:
+        await update.message.reply_text(
+            f"Removed {dropped} stale leg(s) for {tail} {flight_number} from today's digest."
+        )
+    else:
+        await update.message.reply_text(f"No current leg found for {tail} {flight_number}.")
 
 
 async def cmd_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -434,6 +458,7 @@ def register_handlers(application: Application, chat_id: int) -> None:
         ("info", cmd_info),
         ("query", cmd_info),  # alias
         ("remove", cmd_remove),
+        ("dropflight", cmd_dropflight),
         ("watchlist", cmd_watchlist),
         ("airports", cmd_airports),
         ("addairport", cmd_addairport),

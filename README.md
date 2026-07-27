@@ -183,6 +183,7 @@ On first run you'll be asked for:
 | `/add <tail>` | Watch a registration — livery/photo auto-resolved, schedule harvested right away |
 | `/info <tail>` | Full dossier for any aircraft (watched or not) — see below. `/query` also works |
 | `/remove <tail>` | Stop watching (pending legs drop out of the digest) |
+| `/dropflight <tail> <flight>` | Remove a stale flight assignment for one aircraft without unwatching it |
 | `/watchlist` | Show watched aircraft |
 | `/addairport <code>` | Add a target airport by IATA/ICAO code — triggers a full re-harvest |
 | `/rmairport <code>` | Remove a target airport (its legs drop out of the digest) |

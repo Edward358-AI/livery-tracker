@@ -7,6 +7,7 @@ from livery_tracker.schedule_provider import LegRefresh, row_is_cancelled
 from livery_tracker.tracker import (
     LIVE_MAX_OVERRUN,
     _apply_delay_pushback,
+    _callsign_matches_flight,
     _conclude_dark_leg,
 )
 
@@ -136,3 +137,16 @@ def test_row_is_cancelled():
     assert row_is_cancelled({"status": {"generic": {"status": {"text": "cancelled"}}}})
     assert not row_is_cancelled({"status": {"generic": {"status": {"text": "estimated"}}}})
     assert not row_is_cancelled({})
+
+
+def test_callsign_guard_accepts_icao_equivalent_and_rejects_another_flight():
+    # Real N8619F case: SWA3043 was airborne while stale data still assigned
+    # the same tail to WN4244. ICAO/IATA prefixes differ; the suffix must not.
+    assert _callsign_matches_flight("SWA3043", "WN3043")
+    assert _callsign_matches_flight("UAL0012", "UA12")
+    assert not _callsign_matches_flight("SWA3043", "WN4244")
+
+
+def test_callsign_guard_does_not_reject_when_a_number_is_unavailable():
+    assert _callsign_matches_flight(None, "WN4244")
+    assert _callsign_matches_flight("SWA3043", "")
