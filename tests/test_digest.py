@@ -40,6 +40,18 @@ def test_fmt_local_uses_abbreviated_zone():
     assert not stamp.startswith("0")
 
 
+def test_fmt_local_shows_weekday_for_other_days():
+    from datetime import timedelta
+
+    now_local = datetime.now().astimezone()
+    today_stamp = fmt_local(now_local)
+    assert today_stamp[0].isdigit()  # no weekday prefix for today
+
+    future = now_local + timedelta(days=2)
+    future_stamp = fmt_local(future)
+    assert future_stamp.startswith(future.strftime("%a") + " ")
+
+
 def test_render_empty_digest():
     text = render_digest(FlightStore(), make_config())
     assert "LIVERY DIGEST" in text

@@ -32,12 +32,17 @@ STATE_EMOJI = {
 
 
 def fmt_local(when: datetime) -> str:
-    """'3:45 PM PDT' — Windows spells out zone names, so compress to initials."""
+    """'3:45 PM PDT', or 'Mon 3:45 PM PDT' when the time isn't today.
+
+    The 24h harvest window can pull in tomorrow's flights, so a bare time
+    would be ambiguous. Windows spells out zone names; compress to initials.
+    """
     local = when.astimezone()
     tz = local.strftime("%Z")
     if " " in tz:
         tz = "".join(word[0] for word in tz.split())
-    return f"{local.strftime('%I:%M %p').lstrip('0')} {tz}".strip()
+    day = f"{local.strftime('%a')} " if local.date() != datetime.now().astimezone().date() else ""
+    return f"{day}{local.strftime('%I:%M %p').lstrip('0')} {tz}".strip()
 
 
 def _leg_detail(event: FlightEvent) -> str:
