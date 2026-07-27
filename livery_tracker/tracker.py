@@ -348,10 +348,13 @@ def _same_flight_leg(a: FlightEvent, b: FlightEvent) -> bool:
     )
 
 
-def _register_new_events(application: Application, events: list[FlightEvent]) -> int:
-    """Store + schedule any events we haven't seen yet; returns how many were new."""
+def _register_new_events(
+    application: Application, events: list[FlightEvent]
+) -> list[FlightEvent]:
+    """Store + schedule any events we haven't seen yet; returns the genuinely new
+    ones (a flight whose time merely drifted updates in place and is not new)."""
     store: FlightStore = application.bot_data["store"]
-    new_count = 0
+    created: list[FlightEvent] = []
     for event in events:
         if store.get(event.id) is not None:
             continue  # already tracked (e.g. /refresh re-run)
@@ -369,8 +372,8 @@ def _register_new_events(application: Application, events: list[FlightEvent]) ->
             continue
         store.upsert(event)
         schedule_event_jobs(application, event)
-        new_count += 1
-    return new_count
+        created.append(event)
+    return created
 
 
 def _dedupe_store(application: Application) -> int:
@@ -404,19 +407,21 @@ def _dedupe_store(application: Application) -> int:
     return removed
 
 
-async def harvest_single(application: Application, tail: str) -> tuple[int, bool]:
+async def harvest_single(
+    application: Application, tail: str
+) -> tuple[list[FlightEvent], bool]:
     """Targeted harvest for one tail (used right after /add). Refreshes the digest.
 
-    Returns (new_leg_count, sources_ok); on source failure, watch mode is armed.
+    Returns (new_legs, sources_ok); on source failure, watch mode is armed.
     """
     config: Config = application.bot_data["config"]
     livery = (config.watchlist.get(tail) or {}).get("livery", "")
     events, ok = await asyncio.to_thread(schedule_provider.harvest_tail, tail, livery, config)
-    new_count = _register_new_events(application, events)
+    new_legs = _register_new_events(application, events)
     if not ok:
         enable_watch_mode(application)
     await _digest(application).refresh()
-    return new_count, ok
+    return new_legs, ok
 
 
 METADATA_PLACEHOLDERS = {"", "Unknown airline", "Unknown type"}
@@ -459,15 +464,30 @@ async def heal_unknown_metadata(config: Config) -> int:
 class HarvestResult:
     """Outcome of a two-phase harvest, for the caller to report."""
 
-    board_legs: int = 0
-    tail_legs: int = 0
+    board_events: list[FlightEvent] = field(default_factory=list)
+    tail_events: list[FlightEvent] = field(default_factory=list)
     failed_tails: list[str] = field(default_factory=list)
     skipped: bool = False          # another harvest was already running
     board_sources_ok: bool = True
 
     @property
+    def board_legs(self) -> int:
+        return len(self.board_events)
+
+    @property
+    def tail_legs(self) -> int:
+        return len(self.tail_events)
+
+    @property
     def new_legs(self) -> int:
         return self.board_legs + self.tail_legs
+
+    @property
+    def new_events(self) -> list[FlightEvent]:
+        """Everything newly discovered this harvest, in chronological order."""
+        return sorted(
+            self.board_events + self.tail_events, key=lambda e: e.scheduled_time
+        )
 
 
 # One harvest at a time. A sweep now outlives the /refresh cooldown, so this
@@ -524,7 +544,7 @@ async def _run_harvest_locked(application: Application) -> HarvestResult:
         schedule_provider.harvest_airport_boards, config
     )
     result.board_sources_ok = boards_ok
-    result.board_legs = _register_new_events(application, board_events)
+    result.board_events = _register_new_events(application, board_events)
     log.info(
         "Board sweep: %d new leg(s) from %d airport(s) in %.1fs%s",
         result.board_legs, len(config.target_airports),
@@ -542,7 +562,7 @@ async def _run_harvest_locked(application: Application) -> HarvestResult:
         )
         if not ok:
             result.failed_tails.append(tail)
-        result.tail_legs += _register_new_events(application, events)
+        result.tail_events.extend(_register_new_events(application, events))
     log.info(
         "Tail sweep: %d additional leg(s) across %d tail(s) in %.1fs",
         result.tail_legs, len(config.watchlist), (_now() - started).total_seconds(),

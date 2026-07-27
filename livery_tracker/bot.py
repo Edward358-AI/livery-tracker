@@ -15,7 +15,7 @@ from . import aircraft as aircraft_db
 from . import airports as airport_db
 from . import tracker, updater
 from .config import Config
-from .digest import DEFAULT_GROUP_MODE, GROUP_MODES
+from .digest import DEFAULT_GROUP_MODE, GROUP_MODES, format_leg
 from .resolver import resolve_aircraft
 from .throttle import Cooldown
 
@@ -76,12 +76,32 @@ def _config(context: ContextTypes.DEFAULT_TYPE) -> Config:
     return context.application.bot_data["config"]
 
 
+MAX_LISTED_LEGS = 15  # keeps the reply inside Telegram's message limit
+
+
+def _describe_new_legs(events) -> str:
+    """List the legs a harvest just discovered, newest schedule first."""
+    if not events:
+        return ""
+    shown = events[:MAX_LISTED_LEGS]
+    lines = [""] + [format_leg(event) for event in shown]
+    if len(events) > len(shown):
+        lines.append(f"<i>…and {len(events) - len(shown)} more — see the digest.</i>")
+    return "\n".join(lines)
+
+
 async def _background_harvest(application, chat_id: int, tail: str | None = None) -> None:
     """Run a harvest off the handler path and report back when done."""
     try:
         if tail:
-            count, sources_ok = await tracker.harvest_single(application, tail)
-            message = f"📋 Digest updated — {count} new flight leg(s) found."
+            new_legs, sources_ok = await tracker.harvest_single(application, tail)
+            if new_legs:
+                message = (
+                    f"📋 Found {len(new_legs)} flight leg(s) for {tail}:"
+                    + _describe_new_legs(new_legs)
+                )
+            else:
+                message = f"📋 No flights for {tail} at your airports in the next 24h."
             if not sources_ok:
                 message += (
                     "\n⚠️ Schedule sources were unreachable — ADS-B watch mode is "
@@ -91,13 +111,18 @@ async def _background_harvest(application, chat_id: int, tail: str | None = None
             result = await tracker.run_harvest(application)
             if result.skipped:
                 message = "⏳ A harvest is already running — this request was ignored."
-            else:
+            elif result.new_legs:
                 message = (
                     f"📋 Harvest complete — {result.new_legs} new flight leg(s) "
                     f"({result.board_legs} from airport boards, "
-                    f"{result.tail_legs} from the per-tail sweep)."
+                    f"{result.tail_legs} from the per-tail sweep):"
+                    + _describe_new_legs(result.new_events)
                 )
-        await application.bot.send_message(chat_id, message)
+            else:
+                message = "📋 Harvest complete — nothing new since the last sweep."
+        await application.bot.send_message(
+            chat_id, message, parse_mode=ParseMode.HTML, disable_web_page_preview=True
+        )
     except Exception:  # noqa: BLE001
         log.exception("Background harvest failed")
         try:

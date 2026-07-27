@@ -50,7 +50,7 @@ def test_register_updates_existing_leg_instead_of_duplicating():
     app = FakeApp(store)
 
     added = _register_new_events(app, [leg(4)])  # same flight, estimate moved 4 min
-    assert added == 0
+    assert added == []
     assert len(store.events) == 1
     survivor = next(iter(store.events.values()))
     assert survivor.id == original.id
@@ -59,7 +59,8 @@ def test_register_updates_existing_leg_instead_of_duplicating():
     added = _register_new_events(app, [leg(0, flight_number="WN1242",
                                            route_destination="SJC", target_airport="SJC",
                                            id="other")])
-    assert added == 1  # genuinely different flight still gets created
+    assert len(added) == 1  # genuinely different flight still gets created
+    assert added[0].flight_number == "WN1242"  # the caller can report what was found
     assert len(store.events) == 2
 
 
@@ -68,7 +69,7 @@ def test_register_does_not_touch_terminal_legs():
     done = leg(0, status=EventState.DEPARTED)
     store.upsert(done)
     added = _register_new_events(FakeApp(store), [leg(4)])
-    assert added == 0
+    assert added == []
     assert store.get(done.id).scheduled_time == NOW  # untouched
 
 

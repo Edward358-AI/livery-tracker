@@ -153,7 +153,7 @@ def test_board_and_tail_phases_do_not_duplicate_a_shared_flight(monkeypatch):
         ),
     )
     board_events, _ = sp.harvest_airport_boards(config, now=NOW)
-    assert tracker._register_new_events(app, board_events) == 1
+    assert len(tracker._register_new_events(app, board_events)) == 1
     original_time = next(iter(store.events.values())).scheduled_time
 
     # The tail sweep finds the same flight, estimate nudged four minutes later.
@@ -161,7 +161,7 @@ def test_board_and_tail_phases_do_not_duplicate_a_shared_flight(monkeypatch):
     sp._inject_queried_airport(later, "SFO", "arrivals")
     tail_events = sp.rows_to_events("N265AK", "Retro", [later], config, now=NOW)
 
-    assert tracker._register_new_events(app, tail_events) == 0   # updated, not added
+    assert tracker._register_new_events(app, tail_events) == []  # updated, not added
     assert len(store.events) == 1                                # no duplicate
     survivor = next(iter(store.events.values()))
     drift_min = round((survivor.scheduled_time - original_time).total_seconds() / 60)

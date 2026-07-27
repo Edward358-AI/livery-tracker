@@ -77,7 +77,7 @@ def _leg_detail(event: FlightEvent) -> str:
     return detail
 
 
-def _leg_line(event: FlightEvent, show_airport: bool = True) -> str:
+def format_leg(event: FlightEvent, show_airport: bool = True) -> str:
     """One leg. `show_airport` is off when the section header already names it."""
     livery = f' "{event.livery}"' if event.livery else ""
     flight = f" {event.flight_number}" if event.flight_number else ""
@@ -156,9 +156,9 @@ def _sections_by_type(events: list[FlightEvent], config: Config) -> list[Section
             ("🔁 <b>Between your airports</b>", [_merged_line(d, a) for d, a in pairs])
         )
     if arrivals:
-        sections.append(("🛬 <b>Arrivals</b>", [_leg_line(e) for e in arrivals]))
+        sections.append(("🛬 <b>Arrivals</b>", [format_leg(e) for e in arrivals]))
     if departures:
-        sections.append(("🛫 <b>Departures</b>", [_leg_line(e) for e in departures]))
+        sections.append(("🛫 <b>Departures</b>", [format_leg(e) for e in departures]))
     return sections
 
 
@@ -178,7 +178,7 @@ def _sections_by_airport(events: list[FlightEvent], config: Config) -> list[Sect
         name = (config.target_airports.get(code) or {}).get("name", "")
         title = f"🛬🛫 <b>{code}</b>" + (f" — {name}" if name else "")
         legs = sorted(buckets[code], key=lambda e: e.scheduled_time)
-        sections.append((title, [_leg_line(e, show_airport=False) for e in legs]))
+        sections.append((title, [format_leg(e, show_airport=False) for e in legs]))
     return sections
 
 
@@ -195,7 +195,7 @@ def _sections_by_airline(events: list[FlightEvent], config: Config) -> list[Sect
     for dep, arr in pairs:
         add(dep, _merged_line(dep, arr))
     for event in arrivals + departures:
-        add(event, _leg_line(event))
+        add(event, format_leg(event))
 
     sections: list[Section] = []
     for airline in sorted(buckets):
