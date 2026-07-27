@@ -1,3 +1,3 @@
-﻿"""Aircraft Livery Tracker - zero-cost flight watcher for special liveries."""
+"""Aircraft Livery Tracker - zero-cost flight watcher for special liveries."""
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"
