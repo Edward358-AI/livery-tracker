@@ -91,13 +91,18 @@ def test_swapped_leg_keeps_its_original_time():
 
 
 def test_normal_delay_still_proceeds_to_live_tracking():
-    """The swap path must not swallow ordinary delays."""
+    """The swap path must not swallow ordinary delays.
+
+    The delay figure comes from the source's own scheduled-vs-estimated
+    pair, carried on LegRefresh, rather than from drift against whatever we
+    happened to store last.
+    """
     store = FlightStore()
     event = ghost_leg()
     store.upsert(event)
     app = FakeApp(store, make_config())
 
-    run_refresh(app, event, LegRefresh(NOW + timedelta(minutes=20)))
+    run_refresh(app, event, LegRefresh(NOW + timedelta(minutes=20), delay_minutes=20))
 
     survivor = store.get(event.id)
     assert survivor.status == EventState.WAITING_LIVE

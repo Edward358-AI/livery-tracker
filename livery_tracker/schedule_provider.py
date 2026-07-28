@@ -393,6 +393,27 @@ class LegRefresh:
     new_time: datetime | None
     cancelled: bool = False
     swapped: bool = False  # the flight runs, but no longer with our aircraft
+    delay_minutes: int | None = None  # source's own estimated-vs-scheduled figure
+
+
+def _leg_scheduled_and_estimated(
+    row: dict[str, Any], key: str
+) -> tuple[datetime | None, datetime | None]:
+    """(published schedule, current estimate) for one side of a row.
+
+    The delay must come from the source's own two figures. Comparing against
+    the time *we* last stored measures drift since our previous check, which
+    compounds across refreshes and cannot recover when an estimate improves.
+    """
+    times = row.get("time") or {}
+    scheduled = (times.get("scheduled") or {}).get(key)
+    estimated = ((times.get("estimated") or {}).get(key)
+                 or (times.get("real") or {}).get(key))
+
+    def convert(stamp):
+        return datetime.fromtimestamp(stamp, tz=timezone.utc) if stamp else None
+
+    return convert(scheduled), convert(estimated)
 
 
 def _row_flight_number(row: dict[str, Any]) -> str:
@@ -447,9 +468,16 @@ def refresh_leg_time(reg: str, event: FlightEvent) -> LegRefresh:
     list no longer carries this leg, re-check by flight number — that's where
     a cancellation will show up.
     """
+    key = "arrival" if event.type == EventType.ARRIVAL else "departure"
     best = _best_leg_row(fetch_flight_list(reg) or [], event)
     if best is not None:
-        return LegRefresh(best[0], cancelled=row_is_cancelled(best[1]))
+        scheduled, estimated = _leg_scheduled_and_estimated(best[1], key)
+        delay = None
+        if scheduled and estimated:
+            delay = round((estimated - scheduled).total_seconds() / 60)
+        return LegRefresh(
+            best[0], cancelled=row_is_cancelled(best[1]), delay_minutes=delay
+        )
 
     # Our aircraft no longer lists this flight. Ask about the flight itself:
     # cancelled outright, or still running with a different tail (a swap)?

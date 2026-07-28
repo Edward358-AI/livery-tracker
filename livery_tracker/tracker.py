@@ -78,28 +78,45 @@ def _cancel_jobs(application: Application, event_id: str) -> None:
             job.schedule_removal()
 
 
-# A designator is an airline code followed by the flight number: a 3-letter
-# ICAO code in ADS-B callsigns (VOI7790), or a 2-character IATA code in
-# schedules (WN3043) — and an IATA code may itself contain a digit (Y4, B6,
-# 9W). Taking "all the digits" would fold Y4's 4 into the number, so Volaris
-# Y47790 could never match its own callsign VOI7790.
-_DESIGNATOR_RE = re.compile(r"^(?:[A-Z]{3}|[A-Z0-9]{2})\s*0*(\d{1,4})")
+# Airline designators are fixed-width by standard, which is what makes this
+# separable at all: an ICAO designator (used in ADS-B callsigns) is exactly
+# three letters, and an IATA designator (used in published schedules) is
+# exactly two characters — which may include a digit, as in Y4, B6, F9, 9W.
+# Both are followed by a 1-4 digit flight number and an optional suffix
+# letter. Matching on "all the digits" folds the airline code into the
+# number, so Y47790 would never match its own callsign VOI7790.
+_ICAO_CALLSIGN_RE = re.compile(r"^([A-Z]{3})(\d{1,4})([A-Z]?)$")
+_IATA_FLIGHT_RE = re.compile(r"^([A-Z0-9]{2})(\d{1,4})([A-Z]?)$")
+
+
+def _designator_digits(text: str | None, pattern: re.Pattern[str]) -> str:
+    """The flight number from a designator, or "" if it isn't one.
+
+    Anything that is not a well-formed designator — most importantly a bare
+    registration, which some feeds send as the callsign on ferry and
+    positioning flights — yields "" so the caller treats it as unknown
+    rather than as evidence of a mismatch.
+    """
+    match = pattern.match((text or "").strip().upper())
+    return match.group(2).lstrip("0") if match else ""
 
 
 def _flight_digits(designator: str | None) -> str:
-    """The flight number itself, with the airline code stripped off."""
-    match = _DESIGNATOR_RE.match((designator or "").strip().upper())
-    return match.group(1) if match else ""
+    """Flight number from either designator form (schedule or callsign)."""
+    return _designator_digits(designator, _IATA_FLIGHT_RE) or _designator_digits(
+        designator, _ICAO_CALLSIGN_RE
+    )
 
 
 def _callsign_matches_flight(callsign: str | None, flight_number: str) -> bool:
     """Whether live ADS-B telemetry belongs to this scheduled flight.
 
-    If either side has no usable number we cannot prove a mismatch, so we
-    say nothing and leave the normal state machine alone.
+    Only a real ICAO callsign can contradict a real IATA flight number. If
+    either side is missing or malformed we cannot prove anything, so we stay
+    silent and leave the normal state machine alone.
     """
-    seen = _flight_digits(callsign)
-    expected = _flight_digits(flight_number)
+    seen = _designator_digits(callsign, _ICAO_CALLSIGN_RE)
+    expected = _designator_digits(flight_number, _IATA_FLIGHT_RE)
     return not seen or not expected or seen == expected
 
 
@@ -202,15 +219,32 @@ async def job_refresh(context: ContextTypes.DEFAULT_TYPE) -> None:
         # the flight, and report a departure/landing from whatever it really flew.
         await _mark_swapped(application, event, "now flown by another aircraft")
         return
-    if result.new_time is not None:
-        drift_min = round((result.new_time - event.scheduled_time).total_seconds() / 60)
-        if abs(drift_min) >= 1:
-            event.status_note = f"{'delayed' if drift_min > 0 else 'early'} {abs(drift_min)}m"
-        event.scheduled_time = result.new_time
+    _apply_schedule(event, result)
     event.status = EventState.WAITING_LIVE
     store.upsert(event)
     await _digest(application).refresh()
     schedule_event_jobs(application, event)
+
+
+def _apply_schedule(event: FlightEvent, result: schedule_provider.LegRefresh) -> None:
+    """Adopt the source's current time and its own delay figure.
+
+    The note is always recomputed from the latest reading, so an estimate
+    that improves (or an aircraft that catches up) clears the label instead
+    of leaving a stale one behind.
+    """
+    if result.new_time is None:
+        return
+    event.scheduled_time = result.new_time
+    delay = result.delay_minutes
+    if delay is None:
+        return
+    if delay >= 1:
+        event.status_note = f"delayed {delay}m"
+    elif delay <= -1:
+        event.status_note = f"early {abs(delay)}m"
+    else:
+        event.status_note = ""   # back on schedule
 
 
 async def job_live_start(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -219,6 +253,25 @@ async def job_live_start(context: ContextTypes.DEFAULT_TYPE) -> None:
     event = store.get(context.job.data)
     if event is None or event.status.terminal:
         return
+
+    # One last schedule read before we start believing ADS-B. Estimates firm
+    # up close to the event, so this is where a T-2h figure that has since
+    # improved gets corrected — and a late swap or cancellation gets caught.
+    result = await asyncio.to_thread(
+        schedule_provider.refresh_leg_time, event.tail, event
+    )
+    if result.cancelled:
+        event.status = EventState.CANCELLED
+        store.upsert(event)
+        append_history(event)
+        await _digest(application).refresh()
+        log.info("Flight cancelled before live tracking: %s", event.id)
+        return
+    if result.swapped:
+        await _mark_swapped(application, event, "now flown by another aircraft")
+        return
+    _apply_schedule(event, result)
+
     event.status = EventState.LIVE
     store.upsert(event)
     schedule_event_jobs(application, event)

@@ -15,8 +15,16 @@ import livery_tracker.tracker as tracker
 from livery_tracker.adsb import Telemetry
 from livery_tracker.config import Config
 from livery_tracker.flights import EventState, EventType, FlightEvent, FlightStore
-from livery_tracker.schedule_provider import LegRefresh
-from livery_tracker.tracker import _callsign_matches_flight, _flight_digits
+from livery_tracker.schedule_provider import (
+    LegRefresh,
+    _leg_scheduled_and_estimated,
+    refresh_leg_time,
+)
+from livery_tracker.tracker import (
+    _apply_schedule,
+    _callsign_matches_flight,
+    _flight_digits,
+)
 
 # Relative to the real clock: job_poll gives up on a leg LIVE_MAX_OVERRUN past
 # its scheduled time, which a hard-coded date would trip immediately.
@@ -67,6 +75,32 @@ def test_volaris_callsign_is_not_treated_as_a_swap():
 def test_genuinely_different_flights_still_mismatch():
     assert not _callsign_matches_flight("SWA3043", "WN4244")
     assert not _callsign_matches_flight("VOI7790", "Y43061")
+
+
+def test_every_numeric_iata_code_shape_is_handled():
+    """IATA codes are 2 chars and may contain a digit in either position."""
+    assert _callsign_matches_flight("FFT1234", "F91234")    # Frontier F9
+    assert _callsign_matches_flight("JBU605", "B6605")      # JetBlue B6
+    assert _callsign_matches_flight("VOI7790", "Y47790")    # Volaris Y4
+    assert _callsign_matches_flight("JAI221", "9W221")      # digit-first: 9W
+    assert _callsign_matches_flight("AAL3054", "AA3054")    # plain letters
+
+
+def test_a_registration_used_as_a_callsign_proves_nothing():
+    """Ferry and positioning flights transmit the tail, not a flight number.
+
+    N475UA would otherwise parse as airline "N4" plus flight "75" and
+    contradict every real flight number.
+    """
+    assert _callsign_matches_flight("N475UA", "UA1007")
+    assert _callsign_matches_flight("XA-VUS", "Y47790")
+    assert _callsign_matches_flight("", "UA1007")
+    assert _callsign_matches_flight(None, "UA1007")
+
+
+def test_a_missing_flight_number_proves_nothing():
+    assert _callsign_matches_flight("UAL1007", "")
+    assert _callsign_matches_flight("UAL1007", "NOTAFLIGHT")
 
 
 # -- 2. N475UA: "diverted" while still at its origin ----------------------------
@@ -159,6 +193,57 @@ def test_swap_drops_the_rest_of_the_rotation(monkeypatch):
     assert store.get("arr").status == EventState.SWAPPED
     assert store.get("dep").status == EventState.SWAPPED, "downstream leg should go too"
     assert store.active() == []
+
+
+# -- 4. delay figures must come from the source, and must self-correct ---------
+
+def row_with(scheduled_min: int, estimated_min: int) -> dict:
+    base = NOW.replace(second=0, microsecond=0)
+    stamp = lambda m: int((base + timedelta(minutes=m)).timestamp())
+    return {
+        "identification": {"number": {"default": "UA1007"}},
+        "airport": {"origin": {"code": {"iata": "SFO"}},
+                    "destination": {"code": {"iata": "SEA"}}},
+        "time": {"scheduled": {"departure": stamp(scheduled_min)},
+                 "estimated": {"departure": stamp(estimated_min)},
+                 "real": {"departure": None}},
+        "status": {"generic": {"status": {"text": "estimated"}}},
+    }
+
+
+def test_delay_is_read_from_the_sources_own_two_figures(monkeypatch):
+    """FR24 publishes scheduled AND estimated; the delay is their difference."""
+    leg = FlightEvent(
+        id="d", tail="N475UA", livery="", type=EventType.DEPARTURE,
+        target_airport="SFO", scheduled_time=NOW, route_origin="SFO",
+        route_destination="SEA", flight_number="UA1007",
+    )
+    monkeypatch.setattr(sp, "fetch_flight_list",
+                        lambda q, fetch_by="reg": [row_with(0, 15)])
+    result = refresh_leg_time("N475UA", leg)
+    assert result.delay_minutes == 15
+
+
+def test_an_improved_estimate_clears_a_stale_delay_note():
+    """107m was reported, then the airline recovered to 15m: the note follows."""
+    leg = FlightEvent(
+        id="d", tail="N475UA", livery="", type=EventType.DEPARTURE,
+        target_airport="SFO", scheduled_time=NOW, route_origin="SFO",
+        route_destination="SEA", flight_number="UA1007",
+        status=EventState.WAITING_LIVE, status_note="delayed 107m",
+    )
+    _apply_schedule(leg, LegRefresh(NOW + timedelta(minutes=15), delay_minutes=15))
+    assert leg.status_note == "delayed 15m"
+
+    _apply_schedule(leg, LegRefresh(NOW, delay_minutes=0))
+    assert leg.status_note == "", "back on schedule must clear the label"
+
+
+def test_scheduled_and_estimated_extraction():
+    scheduled, estimated = _leg_scheduled_and_estimated(row_with(0, 15), "departure")
+    assert round((estimated - scheduled).total_seconds() / 60) == 15
+    none_row = {"time": {"scheduled": {}, "estimated": {}, "real": {}}}
+    assert _leg_scheduled_and_estimated(none_row, "departure") == (None, None)
 
 
 def test_rotation_recheck_keeps_legs_the_aircraft_still_operates(monkeypatch):
