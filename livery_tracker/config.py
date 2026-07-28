@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,8 @@ from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ENV_FILE = PROJECT_ROOT / ".env"
+ATOMIC_REPLACE_ATTEMPTS = 3
+ATOMIC_REPLACE_DELAY = 0.05
 
 
 def data_dir() -> Path:
@@ -46,7 +49,14 @@ def atomic_write_json(path: Path, payload: Any) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(payload, fh, indent=2, ensure_ascii=False)
-        os.replace(tmp, path)
+        for attempt in range(ATOMIC_REPLACE_ATTEMPTS):
+            try:
+                os.replace(tmp, path)
+                break
+            except PermissionError:
+                if attempt + 1 == ATOMIC_REPLACE_ATTEMPTS:
+                    raise
+                time.sleep(ATOMIC_REPLACE_DELAY)
     except BaseException:
         try:
             os.unlink(tmp)

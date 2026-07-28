@@ -34,6 +34,10 @@ IMPERSONATE_PROFILES = ["chrome", "chrome124", "edge101", "safari17_0"]
 # Keep legs scheduled between (now - 1h) and (now + 24h).
 WINDOW_PAST = timedelta(hours=1)
 WINDOW_FUTURE = timedelta(hours=24)
+# A stale estimate is not proof that the flight operated, especially when its
+# inbound aircraft has only just arrived. Keep explicitly estimated departures
+# longer than ordinary historic schedule rows so rebuilds can recover them.
+ESTIMATED_DEPARTURE_PAST = timedelta(hours=6)
 
 
 # Repeat lookups of the same tail within a few minutes (an impatient /info, a
@@ -178,6 +182,26 @@ def _leg_time(row: dict[str, Any], key: str) -> datetime | None:
     return datetime.fromtimestamp(stamp, tz=timezone.utc)
 
 
+def _is_unresolved_estimated_departure(row: dict[str, Any]) -> bool:
+    """Whether FR24 still explicitly calls this a pending departure."""
+    estimated = ((row.get("time") or {}).get("estimated") or {}).get("departure")
+    status = ((((row.get("status") or {}).get("generic") or {}).get("status")) or {})
+    return bool(estimated and "estimated" in str(status.get("text", "")).lower())
+
+
+def _within_harvest_window(
+    row: dict[str, Any], event_type: EventType, when: datetime, now: datetime
+) -> bool:
+    """Keep ordinary rows for one hour, pending estimated departures for six."""
+    if now - WINDOW_PAST <= when <= now + WINDOW_FUTURE:
+        return True
+    return (
+        event_type == EventType.DEPARTURE
+        and now - ESTIMATED_DEPARTURE_PAST <= when < now - WINDOW_PAST
+        and _is_unresolved_estimated_departure(row)
+    )
+
+
 def rows_to_events(
     reg: str,
     livery: str,
@@ -214,7 +238,7 @@ def rows_to_events(
                 legs.append((EventType.DEPARTURE, match[0], _leg_time(row, "departure")))
 
         for ev_type, target_iata, when in legs:
-            if when is None or not (now - WINDOW_PAST <= when <= now + WINDOW_FUTURE):
+            if when is None or not _within_harvest_window(row, ev_type, when, now):
                 continue
             events.append(
                 FlightEvent(

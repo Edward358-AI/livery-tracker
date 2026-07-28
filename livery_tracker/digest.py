@@ -22,6 +22,7 @@ log = logging.getLogger(__name__)
 STATE_EMOJI = {
     EventState.WAITING_2H: "🟡",
     EventState.WAITING_LIVE: "🕒",
+    EventState.TURNAROUND_DELAY: "⚠️",
     EventState.LIVE: "🚨",
     EventState.LANDED: "✅",
     EventState.DEPARTED: "🛫",
@@ -71,6 +72,8 @@ def _leg_detail(event: FlightEvent) -> str:
         return "aircraft swapped off this flight"
     if event.status == EventState.LOST:
         return f"tracking lost{f' ({event.status_note})' if event.status_note else ''}"
+    if event.status == EventState.TURNAROUND_DELAY:
+        return event.status_note or "Awaiting turnaround / source conflict"
     detail = f"{when_label} {fmt_local(event.scheduled_time)}"
     if event.status == EventState.WAITING_LIVE and event.status_note:
         detail += f" ({event.status_note})"

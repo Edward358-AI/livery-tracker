@@ -9,6 +9,7 @@ __pycache__/
 .venv/
 venv/
 .pytest_cache/
+.codex-test-tmp/
 *.egg-info/
 
 # Logs / process files

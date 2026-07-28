@@ -261,6 +261,7 @@ Updated 7:57 PM PDT
 |---|---|---|
 | 🟡 | Scheduled | Harvested; waiting for the T-2h schedule re-check |
 | 🕒 | Confirmed | Schedule re-checked at T-2h (shows `(delayed Xm)` if it moved) |
+| ⚠️ | Awaiting turnaround | The source ETD conflicts with this tail's inbound arrival; continuing schedule + ADS-B checks without guessing a new time |
 | 🚨 | Live | Polling ADS-B every 2 min — shows altitude · speed · distance |
 | ✅ | Landed | Touched down at your airport (or concluded from signal loss on approach) |
 | 🛫 | Departed | Climbed through 10,000 ft or left 15 NM (or concluded after going dark airborne) |

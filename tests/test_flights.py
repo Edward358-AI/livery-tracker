@@ -1,5 +1,7 @@
 from datetime import datetime, timezone
 
+import livery_tracker.config as config_module
+
 from livery_tracker.config import Config
 from livery_tracker.flights import EventState, EventType, FlightEvent, FlightStore
 
@@ -80,3 +82,24 @@ def test_config_roundtrip_and_code_matching():
     assert loaded.airport_for_code("ksfo")[0] == "SFO"
     assert loaded.airport_for_code("SFO")[0] == "SFO"
     assert loaded.airport_for_code("LAX") is None
+
+
+def test_atomic_write_retries_a_transient_windows_file_lock(monkeypatch, tmp_path):
+    """A brief lock during os.replace must not lose a tracker state update."""
+    target = tmp_path / "state.json"
+    real_replace = config_module.os.replace
+    attempts = 0
+
+    def locked_once(source, destination):
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise PermissionError("temporary file lock")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(config_module.os, "replace", locked_once)
+
+    config_module.atomic_write_json(target, {"saved": True})
+
+    assert attempts == 3
+    assert target.read_text(encoding="utf-8") == '{\n  "saved": true\n}'

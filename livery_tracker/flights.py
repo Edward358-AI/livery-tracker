@@ -19,6 +19,7 @@ class EventType(str, Enum):
 class EventState(str, Enum):
     WAITING_2H = "WAITING_2H"      # digest sent, waiting for T-2h schedule refresh
     WAITING_LIVE = "WAITING_LIVE"  # refreshed, waiting for live-tracking window
+    TURNAROUND_DELAY = "TURNAROUND_DELAY"  # inbound arrived after this leg's source estimate
     LIVE = "LIVE"                  # polling ADS-B every 120s
     LANDED = "LANDED"
     DEPARTED = "DEPARTED"

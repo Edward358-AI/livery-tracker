@@ -79,6 +79,56 @@ def _cancel_jobs(application: Application, event_id: str) -> None:
             job.schedule_removal()
 
 
+TURNAROUND_CONFLICT_NOTE = "Awaiting turnaround / source conflict"
+
+
+def _recorded_landing_time(event: FlightEvent) -> datetime | None:
+    """The ADS-B-confirmed landing time stored on a terminal arrival."""
+    if event.status != EventState.LANDED:
+        return None
+    seen_at = event.last_telemetry.get("seen_at")
+    if not seen_at:
+        return None
+    try:
+        when = datetime.fromisoformat(seen_at)
+    except (TypeError, ValueError):
+        return None
+    return when if when.tzinfo else when.replace(tzinfo=timezone.utc)
+
+
+def _has_turnaround_conflict(store: FlightStore, event: FlightEvent) -> bool:
+    """Whether this outbound conflicts with the tail's inbound rotation.
+
+    A tracker-confirmed landing is definitive. Before touchdown, an active
+    inbound whose ETA is already after the outbound ETD is enough to flag an
+    impossible source sequence, but never to manufacture a replacement time.
+    """
+    if event.type != EventType.DEPARTURE:
+        return False
+    for inbound in store.events.values():
+        if (
+            inbound.tail != event.tail
+            or inbound.type != EventType.ARRIVAL
+            or inbound.target_airport != event.target_airport
+        ):
+            continue
+        landed_at = _recorded_landing_time(inbound)
+        if landed_at is not None and event.scheduled_time < landed_at:
+            return True
+        if (
+            inbound.status in (EventState.WAITING_2H, EventState.WAITING_LIVE, EventState.LIVE)
+            and event.scheduled_time < inbound.scheduled_time
+        ):
+            return True
+    return False
+
+
+def _enter_turnaround_delay(event: FlightEvent) -> None:
+    """Hold an impossible outbound estimate without inventing a replacement."""
+    event.status = EventState.TURNAROUND_DELAY
+    event.status_note = TURNAROUND_CONFLICT_NOTE
+
+
 # Airline designators are fixed-width by standard, which is what makes this
 # separable at all: an ICAO designator (used in ADS-B callsigns) is exactly
 # three letters, and an IATA designator (used in published schedules) is
@@ -192,7 +242,7 @@ def schedule_event_jobs(application: Application, event: FlightEvent) -> None:
     elif event.status == EventState.WAITING_LIVE:
         when = max(event.scheduled_time - LIVE_LEAD[event.type], now + timedelta(seconds=10))
         jq.run_once(job_live_start, when=when, name=f"{event.id}:live_start", data=event.id)
-    elif event.status == EventState.LIVE:
+    elif event.status in (EventState.LIVE, EventState.TURNAROUND_DELAY):
         jq.run_repeating(
             job_poll, interval=POLL_INTERVAL, first=5, name=f"{event.id}:poll", data=event.id
         )
@@ -206,6 +256,7 @@ async def job_refresh(context: ContextTypes.DEFAULT_TYPE) -> None:
     if event is None or event.status.terminal:
         return
 
+    already_conflicted = _has_turnaround_conflict(store, event)
     result = await asyncio.to_thread(schedule_provider.refresh_leg_time, event.tail, event)
     if result.cancelled:
         event.status = EventState.CANCELLED
@@ -214,14 +265,17 @@ async def job_refresh(context: ContextTypes.DEFAULT_TYPE) -> None:
         await _digest(application).refresh()
         log.info("Flight cancelled: %s", event.id)
         return
-    if result.swapped:
+    if result.swapped and not already_conflicted:
         # The flight is operating, just not with our aircraft. End the leg here:
         # letting it reach live tracking would watch the *aircraft* rather than
         # the flight, and report a departure/landing from whatever it really flew.
         await _mark_swapped(application, event, "now flown by another aircraft")
         return
     _apply_schedule(event, result)
-    event.status = EventState.WAITING_LIVE
+    if _has_turnaround_conflict(store, event):
+        _enter_turnaround_delay(event)
+    else:
+        event.status = EventState.WAITING_LIVE
     store.upsert(event)
     await _digest(application).refresh()
     schedule_event_jobs(application, event)
@@ -258,6 +312,7 @@ async def job_live_start(context: ContextTypes.DEFAULT_TYPE) -> None:
     # One last schedule read before we start believing ADS-B. Estimates firm
     # up close to the event, so this is where a T-2h figure that has since
     # improved gets corrected — and a late swap or cancellation gets caught.
+    already_conflicted = _has_turnaround_conflict(store, event)
     result = await asyncio.to_thread(
         schedule_provider.refresh_leg_time, event.tail, event
     )
@@ -268,10 +323,18 @@ async def job_live_start(context: ContextTypes.DEFAULT_TYPE) -> None:
         await _digest(application).refresh()
         log.info("Flight cancelled before live tracking: %s", event.id)
         return
-    if result.swapped:
+    if result.swapped and not already_conflicted:
         await _mark_swapped(application, event, "now flown by another aircraft")
         return
     _apply_schedule(event, result)
+
+    if _has_turnaround_conflict(store, event):
+        _enter_turnaround_delay(event)
+        store.upsert(event)
+        schedule_event_jobs(application, event)
+        await _digest(application).refresh()
+        log.info("Awaiting turnaround for %s: source ETD predates recorded arrival", event.id)
+        return
 
     event.status = EventState.LIVE
     store.upsert(event)
@@ -293,6 +356,38 @@ async def job_poll(context: ContextTypes.DEFAULT_TYPE) -> None:
     airport = config.target_airports.get(event.target_airport) or {}
     telemetry = await asyncio.to_thread(fetch_telemetry, event.tail)
     now = _now()
+
+    # A stale departure estimate can conflict with a landing we directly
+    # observed at the same airport. Keep checking both sources, but do not
+    # mistake the still-inbound callsign for a swap or invent a new ETD. The
+    # ordinary departure check only resumes once the expected flight is in
+    # the air.
+    if event.status == EventState.TURNAROUND_DELAY or _has_turnaround_conflict(store, event):
+        refresh = await asyncio.to_thread(schedule_provider.refresh_leg_time, event.tail, event)
+        if refresh.cancelled:
+            event.status = EventState.CANCELLED
+            event.status_note = ""
+            store.upsert(event)
+            append_history(event)
+            await _digest(application).refresh()
+            context.job.schedule_removal()
+            log.info("Flight cancelled while awaiting turnaround: %s", event.id)
+            return
+        _apply_schedule(event, refresh)
+        if _has_turnaround_conflict(store, event):
+            if telemetry is None or not _callsign_matches_flight(telemetry.callsign, event.flight_number) or telemetry.on_ground:
+                _enter_turnaround_delay(event)
+                store.upsert(event)
+                await _digest(application).refresh()
+                return
+            event.status = EventState.LIVE
+        else:
+            event.status = EventState.WAITING_LIVE
+            store.upsert(event)
+            await _digest(application).refresh()
+            schedule_event_jobs(application, event)
+            log.info("Turnaround conflict cleared by a newer source estimate: %s", event.id)
+            return
 
     if telemetry is None:
         outcome = _conclude_dark_leg(event, now)
