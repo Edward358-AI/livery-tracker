@@ -80,6 +80,7 @@ def _cancel_jobs(application: Application, event_id: str) -> None:
 
 
 TURNAROUND_CONFLICT_NOTE = "Awaiting turnaround / source conflict"
+TURNAROUND_CONFLICT_MAX_LAG = timedelta(hours=12)
 
 
 def _recorded_landing_time(event: FlightEvent) -> datetime | None:
@@ -94,6 +95,12 @@ def _recorded_landing_time(event: FlightEvent) -> datetime | None:
     except (TypeError, ValueError):
         return None
     return when if when.tzinfo else when.replace(tzinfo=timezone.utc)
+
+
+def _arrival_can_precede_outbound(outbound: FlightEvent, inbound_time: datetime) -> bool:
+    """Whether an inbound could plausibly be the outbound's delayed rotation."""
+    delay = inbound_time - outbound.scheduled_time
+    return timedelta() < delay <= TURNAROUND_CONFLICT_MAX_LAG
 
 
 def _has_turnaround_conflict(store: FlightStore, event: FlightEvent) -> bool:
@@ -113,11 +120,11 @@ def _has_turnaround_conflict(store: FlightStore, event: FlightEvent) -> bool:
         ):
             continue
         landed_at = _recorded_landing_time(inbound)
-        if landed_at is not None and event.scheduled_time < landed_at:
+        if landed_at is not None and _arrival_can_precede_outbound(event, landed_at):
             return True
         if (
             inbound.status in (EventState.WAITING_2H, EventState.WAITING_LIVE, EventState.LIVE)
-            and event.scheduled_time < inbound.scheduled_time
+            and _arrival_can_precede_outbound(event, inbound.scheduled_time)
         ):
             return True
     return False

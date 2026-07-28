@@ -98,6 +98,33 @@ def test_live_start_waits_for_an_active_inbound_with_a_later_eta(monkeypatch):
     assert store.get(outbound.id).status.value == "TURNAROUND_DELAY"
 
 
+def test_live_start_ignores_a_next_day_return_as_a_preceding_turnaround(monkeypatch):
+    """Tomorrow's return to OAK cannot delay tonight's OAK departure."""
+    store, config = FlightStore(), sfo_config()
+    outbound = FlightEvent(
+        id="y47791", tail="XA-VUS", livery="", type=EventType.DEPARTURE,
+        target_airport="OAK", scheduled_time=NOW,
+        route_origin="OAK", route_destination="MLM", flight_number="Y47791",
+        status=EventState.WAITING_LIVE,
+    )
+    next_day_return = FlightEvent(
+        id="y47790", tail="XA-VUS", livery="", type=EventType.ARRIVAL,
+        target_airport="OAK", scheduled_time=NOW + timedelta(hours=22),
+        route_origin="MLM", route_destination="OAK", flight_number="Y47790",
+        status=EventState.WAITING_2H,
+    )
+    store.upsert(outbound)
+    store.upsert(next_day_return)
+    app = FakeApp(store, config)
+    monkeypatch.setattr(
+        tracker.schedule_provider, "refresh_leg_time", lambda reg, event: LegRefresh(event.scheduled_time)
+    )
+
+    asyncio.run(tracker.job_live_start(context_for(app, outbound)))
+
+    assert store.get(outbound.id).status == EventState.LIVE
+
+
 def test_turnaround_wait_ignores_inbound_callsign_until_own_flight_takes_off(monkeypatch):
     """The still-inbound UAL2164 must not swap UA1007 off the watched tail."""
     store, config = FlightStore(), sfo_config()
