@@ -78,17 +78,82 @@ def _cancel_jobs(application: Application, event_id: str) -> None:
             job.schedule_removal()
 
 
+# A designator is an airline code followed by the flight number: a 3-letter
+# ICAO code in ADS-B callsigns (VOI7790), or a 2-character IATA code in
+# schedules (WN3043) — and an IATA code may itself contain a digit (Y4, B6,
+# 9W). Taking "all the digits" would fold Y4's 4 into the number, so Volaris
+# Y47790 could never match its own callsign VOI7790.
+_DESIGNATOR_RE = re.compile(r"^(?:[A-Z]{3}|[A-Z0-9]{2})\s*0*(\d{1,4})")
+
+
+def _flight_digits(designator: str | None) -> str:
+    """The flight number itself, with the airline code stripped off."""
+    match = _DESIGNATOR_RE.match((designator or "").strip().upper())
+    return match.group(1) if match else ""
+
+
 def _callsign_matches_flight(callsign: str | None, flight_number: str) -> bool:
     """Whether live ADS-B telemetry belongs to this scheduled flight.
 
-    Airlines use their ICAO callsign in ADS-B (``SWA3043``) while schedules
-    normally show an IATA flight number (``WN3043``). The numeric suffix is
-    the stable part. If either side has no number, we cannot prove a mismatch
-    and leave the normal state machine alone.
+    If either side has no usable number we cannot prove a mismatch, so we
+    say nothing and leave the normal state machine alone.
     """
-    seen = "".join(re.findall(r"\d+", callsign or "")).lstrip("0")
-    expected = "".join(re.findall(r"\d+", flight_number or "")).lstrip("0")
+    seen = _flight_digits(callsign)
+    expected = _flight_digits(flight_number)
     return not seen or not expected or seen == expected
+
+
+async def _mark_swapped(
+    application: Application, event: FlightEvent, note: str, cascade: bool = True
+) -> None:
+    """End a leg the aircraft is no longer operating, and check its siblings.
+
+    An aircraft taken off one flight has usually lost the rest of that
+    rotation too, so the tail's other pending legs are re-verified rather
+    than left sitting in the digest until each reaches its own T-2h check.
+    """
+    store: FlightStore = application.bot_data["store"]
+    event.status = EventState.SWAPPED
+    event.status_note = note
+    store.upsert(event)
+    append_history(event)
+    _cancel_jobs(application, event.id)
+    log.info("Leg %s dropped: %s", event.id, note)
+
+    if cascade:
+        await _recheck_rotation(application, event.tail, skip_id=event.id)
+    await _digest(application).refresh()
+
+
+async def _recheck_rotation(
+    application: Application, tail: str, skip_id: str | None = None
+) -> int:
+    """Re-verify a tail's other pending legs after a confirmed swap.
+
+    fetch_flight_list memoises for five minutes, so these checks normally
+    reuse the rows already fetched and cost no extra requests.
+    """
+    store: FlightStore = application.bot_data["store"]
+    siblings = [
+        ev for ev in store.events.values()
+        if ev.tail == tail
+        and ev.id != skip_id
+        and ev.status in (EventState.WAITING_2H, EventState.WAITING_LIVE)
+    ]
+    dropped = 0
+    for sibling in siblings:
+        refresh = await asyncio.to_thread(
+            schedule_provider.refresh_leg_time, sibling.tail, sibling
+        )
+        if refresh.swapped:
+            # cascade=False: one pass is enough, and it keeps this bounded.
+            await _mark_swapped(
+                application, sibling, "now flown by another aircraft", cascade=False
+            )
+            dropped += 1
+    if dropped:
+        log.info("Rotation re-check dropped %d further leg(s) for %s", dropped, tail)
+    return dropped
 
 
 # ---------------------------------------------------------------------------
@@ -135,12 +200,7 @@ async def job_refresh(context: ContextTypes.DEFAULT_TYPE) -> None:
         # The flight is operating, just not with our aircraft. End the leg here:
         # letting it reach live tracking would watch the *aircraft* rather than
         # the flight, and report a departure/landing from whatever it really flew.
-        event.status = EventState.SWAPPED
-        event.status_note = "now flown by another aircraft"
-        store.upsert(event)
-        append_history(event)
-        await _digest(application).refresh()
-        log.info("Leg %s dropped: aircraft swapped off this flight", event.id)
+        await _mark_swapped(application, event, "now flown by another aircraft")
         return
     if result.new_time is not None:
         drift_min = round((result.new_time - event.scheduled_time).total_seconds() / 60)
@@ -214,27 +274,25 @@ async def job_poll(context: ContextTypes.DEFAULT_TYPE) -> None:
     # cause of N8619F being shown as both WN3043 and WN4244 from one OAK
     # departure. The mismatch is strong evidence the aircraft was swapped.
     if not _callsign_matches_flight(telemetry.callsign, event.flight_number):
-        event.status = EventState.SWAPPED
-        event.status_note = f"aircraft operating {telemetry.callsign} instead"
-        store.upsert(event)
-        append_history(event)
-        await _digest(application).refresh()
-        context.job.schedule_removal()
-        log.info(
-            "Leg %s dropped: expected %s but ADS-B callsign is %s",
-            event.id,
-            event.flight_number,
-            telemetry.callsign,
+        await _mark_swapped(
+            application, event, f"aircraft operating {telemetry.callsign} instead"
         )
+        context.job.schedule_removal()
         return
 
     dist_nm = None
     if airport.get("lat") is not None:
         dist_nm = haversine_nm(telemetry.lat, telemetry.lon, airport["lat"], airport["lon"])
     prev_divert_hits = event.last_telemetry.get("divert_hits") or 0
+    # An aircraft still sitting at its origin is on the ground and far from
+    # the destination — indistinguishable from a diversion unless we require
+    # having actually seen it fly this leg first. Without this, a delayed
+    # departure gets reported as "diverted" at its own origin airport.
+    was_airborne = bool(event.last_telemetry.get("was_airborne")) or not telemetry.on_ground
     divert_candidate = (
         event.type == EventType.ARRIVAL
         and telemetry.on_ground
+        and was_airborne
         and dist_nm is not None
         and dist_nm >= DIVERT_MIN_DIST_NM
     )
@@ -246,6 +304,7 @@ async def job_poll(context: ContextTypes.DEFAULT_TYPE) -> None:
         "dist_nm": dist_nm,
         "on_ground": telemetry.on_ground,
         "baro_rate": telemetry.baro_rate,
+        "was_airborne": was_airborne,
         "seen_at": now.isoformat(),
         "divert_hits": prev_divert_hits + 1 if divert_candidate else 0,
     }
