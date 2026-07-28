@@ -20,8 +20,15 @@ log = logging.getLogger(__name__)
 # Positions go stale fast, so this window is short — just enough that a repeat
 # /info (or two legs of the same aircraft polling together) reuses one fetch.
 _TELEMETRY_MEMO = TTLCache(ttl_seconds=45)
+
 # Routes for a callsign are static for the day; the registry is slow-moving.
 _ROUTE_MEMO = TTLCache(ttl_seconds=3600)
+
+
+def clear_caches() -> None:
+    """Drop memoised positions and callsign routes (used by a rebuild)."""
+    _TELEMETRY_MEMO.clear()
+    _ROUTE_MEMO.clear()
 
 SOURCES = [
     "https://opendata.adsb.fi/api/v2/registration/{reg}",

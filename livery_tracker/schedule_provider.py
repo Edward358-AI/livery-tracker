@@ -96,6 +96,26 @@ def _schedule_cache_path():
     return data_dir() / "schedule_cache.json"
 
 
+def clear_caches() -> int:
+    """Forget every cached schedule: the memos and the 12h disk fallback.
+
+    Returns the number of tails dropped from the disk cache. Aircraft facts
+    (/info) and the airport database are untouched — neither is a schedule.
+    """
+    _LIST_MEMO.clear()
+    _BOARD_MEMO.clear()
+    path = _schedule_cache_path()
+    dropped = 0
+    if path.exists():
+        try:
+            dropped = len(json.loads(path.read_text(encoding="utf-8")))
+        except json.JSONDecodeError:
+            pass
+        path.unlink()
+    log.info("Cleared schedule caches (%d cached tail(s) dropped)", dropped)
+    return dropped
+
+
 def cache_rows(reg: str, rows: list[dict[str, Any]]) -> None:
     from .config import atomic_write_json
 

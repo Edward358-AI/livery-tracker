@@ -28,6 +28,7 @@ BOT_COMMANDS = [
     BotCommand("status", "Tracker status"),
     BotCommand("view", "Change how the digest is grouped"),
     BotCommand("refresh", "Run schedule harvest now"),
+    BotCommand("rebuild", "Clear cached schedules and re-harvest"),
     BotCommand("version", "Version + update check"),
     BotCommand("update", "Install the latest release"),
     BotCommand("help", "Show help"),
@@ -114,5 +115,16 @@ async def harvest_once(creds: Credentials) -> int:
         try:
             result = await tracker.run_harvest(application)
             return result.new_legs
+        finally:
+            await application.bot_data["digest"].aclose()
+
+
+async def rebuild_once(creds: Credentials) -> tuple[int, int]:
+    """One-shot rebuild (for --rebuild). Returns (discarded, re-harvested)."""
+    application = build_application(creds)
+    async with application:
+        try:
+            result = await tracker.rebuild_schedule(application)
+            return result.discarded_legs, result.new_legs
         finally:
             await application.bot_data["digest"].aclose()

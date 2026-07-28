@@ -23,6 +23,11 @@ def main() -> None:
     parser.add_argument(
         "--update", action="store_true", help="check for and install the latest release"
     )
+    parser.add_argument(
+        "--rebuild",
+        action="store_true",
+        help="discard today's legs and cached schedules, then re-harvest",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -58,11 +63,17 @@ def main() -> None:
             print("Setup did not complete — exiting.")
             sys.exit(1)
 
-    from .app import harvest_once, run  # deferred: telegram import is slow
+    from .app import harvest_once, rebuild_once, run  # deferred: telegram is slow
 
     if args.harvest_now:
         count = asyncio.run(harvest_once(creds))
         print(f"Harvest finished: {count} new flight leg(s).")
+        return
+
+    if args.rebuild:
+        discarded, count = asyncio.run(rebuild_once(creds))
+        print(f"Rebuild finished: discarded {discarded} stored leg(s), "
+              f"re-harvested {count}.")
         return
 
     # Exit code 42 tells the supervisor (runner script / NSSM / systemd)

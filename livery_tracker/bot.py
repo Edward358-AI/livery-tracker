@@ -65,6 +65,7 @@ HELP_TEXT = """<b>✈️ Livery Tracker Commands</b>
 
 <b>Tracking</b>
 /refresh — re-run today's schedule harvest now
+/rebuild — wipe today's legs + cached schedules, then re-harvest
 /status — tracker status
 /version — running version + update check
 /update — install the latest release now
@@ -496,6 +497,47 @@ async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     )
 
 
+async def _background_rebuild(application, chat_id: int) -> None:
+    try:
+        result = await tracker.rebuild_schedule(application)
+        if result.skipped:
+            message = "⏳ A harvest is already running — rebuild ignored."
+        else:
+            message = (
+                f"♻️ Rebuilt from scratch — discarded {result.discarded_legs} stored "
+                f"leg(s) and re-harvested {result.new_legs} "
+                f"({result.board_legs} from airport boards, "
+                f"{result.tail_legs} from the per-tail sweep)."
+                + _describe_new_legs(result.new_events)
+            )
+        await application.bot.send_message(
+            chat_id, message, parse_mode=ParseMode.HTML, disable_web_page_preview=True
+        )
+    except Exception:  # noqa: BLE001
+        log.exception("Rebuild failed")
+        try:
+            await application.bot.send_message(chat_id, "⚠️ Rebuild failed — check logs.")
+        except Exception:  # noqa: BLE001
+            pass
+
+
+async def cmd_rebuild(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Discard today's legs and cached schedules, then re-harvest from scratch."""
+    if tracker.harvest_in_progress():
+        await update.message.reply_text(
+            "⏳ A harvest is already running — try again once it finishes."
+        )
+        return
+    await update.message.reply_text(
+        "♻️ Rebuilding: clearing today's legs and cached schedules, then "
+        "re-harvesting.\nYour watchlist, airports and aircraft details are kept.\n"
+        "This takes a couple of minutes — the digest updates as it goes."
+    )
+    context.application.create_task(
+        _background_rebuild(context.application, update.effective_chat.id)
+    )
+
+
 async def cmd_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # A sweep now outlives the cooldown window, so check the harvest lock too.
     if tracker.harvest_in_progress():
@@ -532,6 +574,7 @@ def register_handlers(application: Application, chat_id: int) -> None:
         ("status", cmd_status),
         ("view", cmd_view),
         ("refresh", cmd_refresh),
+        ("rebuild", cmd_rebuild),
         ("version", cmd_version),
         ("update", cmd_update),
     ]:

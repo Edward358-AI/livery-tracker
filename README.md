@@ -189,6 +189,7 @@ On first run you'll be asked for:
 | `/rmairport <code>` | Remove a target airport (its legs drop out of the digest) |
 | `/airports` | List target airports |
 | `/refresh` | Re-run today's schedule harvest right now |
+| `/rebuild` | Discard today's legs + cached schedules and re-harvest from scratch (keeps your watchlist, airports and aircraft details) |
 | `/status` | Watchlist size, airports, digest layout, active flight legs |
 | `/view` | Show the digest layout; `/view type\|airport\|airline` changes it |
 | `/version` | Running version + whether a newer release exists |

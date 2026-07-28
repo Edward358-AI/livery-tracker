@@ -21,6 +21,7 @@ from typing import Callable
 
 from telegram.ext import Application, ContextTypes
 
+from . import adsb
 from . import airports as airport_db
 from . import schedule_provider
 from .adsb import Telemetry, fetch_telemetry, resolve_callsign_route
@@ -614,6 +615,7 @@ class HarvestResult:
     failed_tails: list[str] = field(default_factory=list)
     skipped: bool = False          # another harvest was already running
     board_sources_ok: bool = True
+    discarded_legs: int = 0        # set by rebuild_schedule
 
     @property
     def board_legs(self) -> int:
@@ -642,6 +644,37 @@ _harvest_lock = asyncio.Lock()
 
 def harvest_in_progress() -> bool:
     return _harvest_lock.locked()
+
+
+async def rebuild_schedule(application: Application) -> HarvestResult:
+    """Throw away today's tracked legs and cached schedules, then re-harvest.
+
+    For when stored state has gone wrong — a stale assignment, a bad status
+    frozen into a terminal leg — and the fastest cure is to rebuild from the
+    sources rather than reason about what to patch. Deliberately keeps the
+    watchlist, airports, aircraft dossiers and history: none of those are
+    schedule state.
+    """
+    if _harvest_lock.locked():
+        log.info("Harvest already running — rebuild ignored")
+        return HarvestResult(skipped=True)
+
+    async with _harvest_lock:
+        store: FlightStore = application.bot_data["store"]
+        for event in list(store.events.values()):
+            _cancel_jobs(application, event.id)
+        discarded = len(store.events)
+        store.clear()
+
+        cached_tails = await asyncio.to_thread(schedule_provider.clear_caches)
+        adsb.clear_caches()
+        log.info(
+            "Rebuild: discarded %d leg(s) and %d cached schedule(s)",
+            discarded, cached_tails,
+        )
+        result = await _run_harvest_locked(application)
+        result.discarded_legs = discarded
+        return result
 
 
 async def run_harvest(application: Application) -> HarvestResult:
