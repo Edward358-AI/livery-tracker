@@ -261,6 +261,39 @@ def test_a_dark_transponder_is_not_positive_evidence(monkeypatch):
     assert store.get("arr").status == EventState.WAITING_2H
 
 
+# -- the 15-minute hot lane ----------------------------------------------------
+
+def test_hot_sync_only_touches_tails_with_an_imminent_leg(monkeypatch):
+    soon = pending_leg(scheduled_time=NOW + timedelta(minutes=70))
+    later = pending_leg(
+        id="later", tail="N985AK", flight_number="AS656",
+        scheduled_time=NOW + timedelta(hours=6),
+    )
+    app, store = app_with(soon, later)
+    fetched: list[str] = []
+
+    def spy_fetch(query, fetch_by="reg"):
+        fetched.append(query)
+        return []
+
+    monkeypatch.setattr(tracker.schedule_provider, "fetch_flight_list", spy_fetch)
+    monkeypatch.setattr(tracker.schedule_provider, "cache_rows", lambda reg, r: None)
+    monkeypatch.setattr(
+        tracker.schedule_provider, "refresh_leg_time",
+        lambda reg, ev: LegRefresh(ev.scheduled_time),
+    )
+    monkeypatch.setattr(tracker, "fetch_telemetry", lambda reg: None)
+    monkeypatch.setattr(tracker.airport_db, "nearest", lambda lat, lon: None)
+
+    counts = asyncio.run(tracker.run_schedule_sync(app, hot_only=True))
+    assert fetched == ["N265AK"], "only the tail with a leg due within 2h"
+    assert counts["tails"] == 1
+
+    fetched.clear()
+    asyncio.run(tracker.run_schedule_sync(app))
+    assert sorted(fetched) == ["N265AK", "N985AK"], "the full pass covers everyone"
+
+
 # -- the turnaround guard survives the mirror ---------------------------------
 
 def test_sync_never_withdraws_a_leg_held_by_the_turnaround_guard(monkeypatch):

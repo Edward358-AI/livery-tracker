@@ -65,7 +65,7 @@ HELP_TEXT = """<b>✈️ Livery Tracker Commands</b>
 
 <b>Tracking</b>
 /refresh — re-run today's schedule harvest now
-/rebuild — wipe today's legs + cached schedules, then re-harvest
+/rebuild — re-derive today's schedule (observed landings/departures are kept)
 /status — tracker status
 /version — running version + update check
 /update — install the latest release now

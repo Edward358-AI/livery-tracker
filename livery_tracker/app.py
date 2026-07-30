@@ -97,19 +97,24 @@ def build_application(creds: Credentials) -> Application:
         name="update_check",
     )
     # The mirror layer: hourly reconciliation of pending legs against the
-    # source, plus a cheap boards-only sweep for newly scheduled legs. Both
-    # share the harvest lock, so they skip themselves when a harvest runs.
+    # source, a 15-minute hot pass for legs entering their final two hours,
+    # and a cheap boards-only sweep for newly scheduled legs. All share the
+    # harvest lock, so they skip themselves when a harvest runs.
     application.job_queue.run_repeating(
         tracker.job_hourly_sync, interval=tracker.SYNC_INTERVAL, first=900,
         name="hourly_sync",
+    )
+    application.job_queue.run_repeating(
+        tracker.job_hot_sync, interval=tracker.HOT_SYNC_INTERVAL, first=300,
+        name="hot_sync",
     )
     application.job_queue.run_repeating(
         tracker.job_board_discovery, interval=tracker.DISCOVERY_INTERVAL, first=3600,
         name="board_discovery",
     )
     log.info(
-        "Daily harvest scheduled for %02d:%02d local time; "
-        "hourly schedule sync and 3-hourly board discovery armed",
+        "Daily harvest scheduled for %02d:%02d local time; hourly sync, "
+        "15-minute hot sync, and 3-hourly board discovery armed",
         hour, minute,
     )
     return application

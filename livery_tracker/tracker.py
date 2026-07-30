@@ -58,7 +58,12 @@ STALE_AFTER = timedelta(hours=12)  # events this far past schedule are purged at
 
 # Hourly mirror sync: pending legs are reconciled against the source; legs
 # being tracked live belong to ADS-B and are never touched by the sync.
+# Legs entering their final stretch get a faster lane: a hot pass every 15
+# minutes covering only tails with something due within two hours, so a
+# late cancellation or swap can't hide in the hourly gap.
 SYNC_INTERVAL = 3600               # seconds
+HOT_SYNC_INTERVAL = 900            # seconds
+HOT_WINDOW = timedelta(hours=2)    # a leg due within this joins the hot pass
 DISCOVERY_INTERVAL = 3 * 3600      # boards-only sweep for new legs
 UNVERIFIED_NOTE = "unverified — source unreachable"
 WITHDRAWN_NOTE = "no longer scheduled for this aircraft"
@@ -241,6 +246,21 @@ def _foreign_callsign_note(event: FlightEvent, telemetry: Telemetry | None) -> s
     if seen and expected and seen != expected:
         return f"aircraft still operating {telemetry.callsign.strip()} — awaiting rotation"
     return ""
+
+
+def _conclude_from_source(
+    event: FlightEvent, refresh: schedule_provider.LegRefresh
+) -> None:
+    """Adopt the source's record that this leg has already flown.
+
+    Used when we did not observe the movement ourselves — the aircraft was
+    dark, or already wearing its next callsign by the time we looked.
+    """
+    event.status = (
+        EventState.LANDED if event.type == EventType.ARRIVAL else EventState.DEPARTED
+    )
+    stamp = refresh.real_time or refresh.new_time
+    event.status_note = f"~{fmt_local(stamp)} (per source)" if stamp else "per source"
 
 
 NO_SHOW_GRACE = timedelta(minutes=10)
@@ -453,6 +473,16 @@ async def job_poll(context: ContextTypes.DEFAULT_TYPE) -> None:
         if airborne_as_ours or at_origin_as_ours:
             event.status = EventState.LIVE  # fall through to normal detection
         else:
+            if refresh.completed:
+                # The source recorded the flight as flown while we held the
+                # leg — whatever premise justified the hold is gone.
+                _conclude_from_source(event, refresh)
+                store.upsert(event)
+                append_history(event)
+                await _digest(application).refresh()
+                context.job.schedule_removal()
+                log.info("Leg %s concluded per source: %s", event.id, event.status.value)
+                return
             if await asyncio.to_thread(_has_turnaround_conflict, store, event):
                 note = TURNAROUND_CONFLICT_NOTE
             else:
@@ -509,6 +539,8 @@ async def job_poll(context: ContextTypes.DEFAULT_TYPE) -> None:
                 return
             if action == "cancelled":
                 event.status, event.status_note = EventState.CANCELLED, ""
+            elif action == "completed":
+                _conclude_from_source(event, refresh)
             elif action == "swapped":
                 event.status, event.status_note = EventState.SWAPPED, WITHDRAWN_NOTE
             elif now > event.scheduled_time + LIVE_MAX_OVERRUN:
@@ -566,6 +598,18 @@ async def job_poll(context: ContextTypes.DEFAULT_TYPE) -> None:
                 application, event, f"aircraft operating {telemetry.callsign} instead"
             )
             context.job.schedule_removal()
+            return
+        if refresh.completed:
+            # The source records this leg as already flown — the mismatched
+            # callsign is just the aircraft wearing its next assignment (the
+            # WN3982 case: landed 10:51, at the gate already squawking the
+            # next flight by the time a rebuild re-created the leg).
+            _conclude_from_source(event, refresh)
+            store.upsert(event)
+            append_history(event)
+            await _digest(application).refresh()
+            context.job.schedule_removal()
+            log.info("Leg %s concluded per source: %s", event.id, event.status.value)
             return
         # Still ours per the source: mirror its delay and hold for the rotation.
         _apply_schedule(event, refresh)
@@ -671,11 +715,14 @@ def _apply_delay_pushback(
 ) -> str | None:
     """When a no-show flight's schedule moved later, wait instead of giving up.
 
-    Returns "delayed" (event mutated back to WAITING_LIVE), "cancelled", or
-    None when the schedule offers no explanation.
+    Returns "delayed" (event mutated back to WAITING_LIVE), "cancelled",
+    "completed" (the source recorded the flight as flown — a coverage gap on
+    our side), "swapped", or None when the schedule offers no explanation.
     """
     if refresh.cancelled:
         return "cancelled"
+    if refresh.completed:
+        return "completed"
     if refresh.swapped:
         return "swapped"
     if refresh.new_time is not None and refresh.new_time > event.scheduled_time + DELAY_MIN_PUSHBACK:
@@ -1045,14 +1092,25 @@ def harvest_in_progress() -> bool:
     return _harvest_lock.locked()
 
 
+# Conclusions we watched happen (each also cross-checked against the source
+# by the verification job). A rebuild rebuilds the future — it must not
+# rewrite the past, or a landing we directly observed gets re-derived from
+# the source alone, badly (the WN3982 case). Derived verdicts (SWAPPED,
+# CANCELLED, LOST) stay clearable: they come from reading the source or from
+# absence of signal, and re-deriving them is exactly what a rebuild is for.
+OBSERVED_CONCLUSIONS = (EventState.LANDED, EventState.DEPARTED, EventState.DIVERTED)
+
+
 async def rebuild_schedule(application: Application) -> HarvestResult:
-    """Throw away today's tracked legs and cached schedules, then re-harvest.
+    """Re-derive today's schedule from the sources, keeping observed history.
 
     For when stored state has gone wrong — a stale assignment, a bad status
     frozen into a terminal leg — and the fastest cure is to rebuild from the
     sources rather than reason about what to patch. Deliberately keeps the
-    watchlist, airports, aircraft dossiers and history: none of those are
-    schedule state.
+    watchlist, airports, aircraft dossiers, history, and every conclusion we
+    directly observed (landed / departed / diverted); a wrong one of those is
+    /dropflight's job. Everything else — pending legs, derived verdicts, and
+    the schedule caches — is cleared and re-derived.
     """
     if _harvest_lock.locked():
         log.info("Harvest already running — rebuild ignored")
@@ -1060,16 +1118,17 @@ async def rebuild_schedule(application: Application) -> HarvestResult:
 
     async with _harvest_lock:
         store: FlightStore = application.bot_data["store"]
-        for event in list(store.events.values()):
+        removed = store.remove_where(lambda ev: ev.status not in OBSERVED_CONCLUSIONS)
+        for event in removed:
             _cancel_jobs(application, event.id)
-        discarded = len(store.events)
-        store.clear()
+        discarded = len(removed)
 
         cached_tails = await asyncio.to_thread(schedule_provider.clear_caches)
         adsb.clear_caches()
         log.info(
-            "Rebuild: discarded %d leg(s) and %d cached schedule(s)",
-            discarded, cached_tails,
+            "Rebuild: discarded %d leg(s) (kept %d observed conclusion(s)) "
+            "and %d cached schedule(s)",
+            discarded, len(store.events), cached_tails,
         )
         result = await _run_harvest_locked(application)
         result.discarded_legs = discarded
@@ -1202,17 +1261,29 @@ async def job_hourly_sync(context: ContextTypes.DEFAULT_TYPE) -> None:
     await run_schedule_sync(context.application)
 
 
-async def run_schedule_sync(application: Application) -> dict[str, int] | None:
-    """Reconcile every pending leg with the source. Returns per-action counts,
-    or None when a harvest was already running (it does the same work)."""
+async def job_hot_sync(context: ContextTypes.DEFAULT_TYPE) -> None:
+    await run_schedule_sync(context.application, hot_only=True)
+
+
+async def run_schedule_sync(
+    application: Application, hot_only: bool = False
+) -> dict[str, int] | None:
+    """Reconcile pending legs with the source. Returns per-action counts, or
+    None when a harvest was already running (it does the same work).
+
+    hot_only restricts the pass to tails with a leg due within HOT_WINDOW —
+    the cheap 15-minute lane for flights entering their final stretch.
+    """
     if _harvest_lock.locked():
-        log.info("Harvest in progress — hourly sync skipped")
+        log.info("Harvest in progress — %s sync skipped", "hot" if hot_only else "hourly")
         return None
     async with _harvest_lock:
-        return await _run_sync_locked(application)
+        return await _run_sync_locked(application, hot_only=hot_only)
 
 
-async def _run_sync_locked(application: Application) -> dict[str, int]:
+async def _run_sync_locked(
+    application: Application, hot_only: bool = False
+) -> dict[str, int]:
     store: FlightStore = application.bot_data["store"]
     config: Config = application.bot_data["config"]
     now = _now()
@@ -1224,6 +1295,12 @@ async def _run_sync_locked(application: Application) -> dict[str, int]:
     for ev in store.events.values():
         if ev.status in SYNC_STATES:
             pending_by_tail.setdefault(ev.tail, []).append(ev)
+    if hot_only:
+        horizon = now + HOT_WINDOW
+        pending_by_tail = {
+            tail: legs for tail, legs in pending_by_tail.items()
+            if any(leg.scheduled_time <= horizon for leg in legs)
+        }
 
     for tail, legs in pending_by_tail.items():
         counts["tails"] += 1
@@ -1323,10 +1400,11 @@ async def _run_sync_locked(application: Application) -> dict[str, int]:
     if changed:
         await _digest(application).refresh()
     log.info(
-        "Hourly sync: %(tails)d tail(s) — %(updated)d updated, %(withdrawn)d "
-        "withdrawn, %(cancelled)d cancelled, %(discovered)d discovered, "
-        "%(conflicts)d position conflict(s), %(unverified)d unverified",
-        counts,
+        "%s sync: %d tail(s) — %d updated, %d withdrawn, %d cancelled, "
+        "%d discovered, %d position conflict(s), %d unverified",
+        "Hot" if hot_only else "Hourly", counts["tails"], counts["updated"],
+        counts["withdrawn"], counts["cancelled"], counts["discovered"],
+        counts["conflicts"], counts["unverified"],
     )
     return counts
 

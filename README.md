@@ -191,7 +191,7 @@ On first run you'll be asked for:
 | `/rmairport <code>` | Remove a target airport (its legs drop out of the digest) |
 | `/airports` | List target airports |
 | `/refresh` | Re-run today's schedule harvest right now |
-| `/rebuild` | Discard today's legs + cached schedules and re-harvest from scratch (keeps your watchlist, airports and aircraft details) |
+| `/rebuild` | Re-derive today's schedule from the sources. Keeps your watchlist, airports, aircraft details **and every landing/departure/diversion the tracker directly observed** — a rebuild rebuilds the future, it doesn't rewrite the past (a wrong observed record is `/dropflight`'s job) |
 | `/status` | Watchlist size, airports, digest layout, active flight legs |
 | `/view` | Show the digest layout; `/view type\|airport\|airline` changes it |
 | `/version` | Running version + whether a newer release exists |
@@ -368,6 +368,14 @@ a real departure at one end and a real arrival at the other.
   verbatim, cancellations become ❌, and a leg the source no longer lists is
   withdrawn (🔀). A failed fetch marks legs *unverified* instead of dropping them.
   Legs already being tracked live belong to ADS-B and are never touched by the sync.
+  On top of the hourly floor, a **15-minute hot pass** covers just the tails with a
+  leg due within 2 hours, so a late cancellation or swap can't hide in the gap.
+- **Completed-awareness**: whenever the tracker consults the source about a leg it
+  can't observe (a mismatched callsign, a held conflict, an aircraft that never
+  appeared on ADS-B), it also reads whether the source records the flight as
+  already flown — and if so concludes ✅/🛫 *per source* with the actual time,
+  instead of holding or marking the leg lost. Live observation still always wins
+  when it exists.
 - **Delays**: delay figures always come from the source's own scheduled-vs-estimated
   pair. A flight that hasn't shown up 30 min past its time gets extra schedule
   checks — if it moved later, the leg waits for the new time; if the source offers

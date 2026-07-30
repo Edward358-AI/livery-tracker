@@ -97,19 +97,25 @@ async def _noop_heal(config):
     return 0
 
 
-def test_rebuild_discards_stored_legs_and_reharvests(monkeypatch):
+def test_rebuild_discards_derived_legs_but_keeps_observed_ones(monkeypatch):
+    """Rebuild rebuilds the future: derived verdicts (swapped/lost/cancelled)
+    and pending legs are re-derived, but a conclusion we directly observed
+    (landed/departed/diverted) is history, not schedule state."""
     store, config = FlightStore(), make_config()
-    store.upsert(stale_leg("bad-diverted", EventState.DIVERTED))
+    store.upsert(stale_leg("observed-diverted", EventState.DIVERTED))
     store.upsert(stale_leg("bad-swapped", EventState.SWAPPED))
     store.upsert(stale_leg("pending"))
     sp.cache_rows("N265AK", [{"stale": True}])
 
     fresh = stale_leg("fresh")
+    fresh.flight_number = "AS2222"  # a different flight — the kept observed
+    fresh.scheduled_time = NOW + timedelta(hours=4)  # leg must not block it
     app, result = rebuild_with(monkeypatch, store, config, harvested=[fresh])
 
-    assert result.discarded_legs == 3
+    assert result.discarded_legs == 2
     assert result.skipped is False
-    assert list(store.events) == ["fresh"], "terminal junk must not survive"
+    assert set(store.events) == {"observed-diverted", "fresh"}, \
+        "derived junk goes, observed history stays"
     assert sp.load_cached_rows("N265AK") is None
 
 

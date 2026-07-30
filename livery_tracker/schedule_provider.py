@@ -438,6 +438,28 @@ class LegRefresh:
     cancelled: bool = False
     swapped: bool = False  # the flight runs, but no longer with our aircraft
     delay_minutes: int | None = None  # source's own estimated-vs-scheduled figure
+    completed: bool = False           # the source records this leg as already flown
+    real_time: datetime | None = None  # the source's actual off/on time, if recorded
+
+
+def _row_completed(row: dict[str, Any], key: str) -> tuple[bool, datetime | None]:
+    """Whether the source's row says this side of the flight already happened.
+
+    A real (actual) time is definitive. Otherwise the status text decides —
+    and for departures a row marked live counts: the flight is in the air,
+    so it has certainly left its origin.
+    """
+    times = row.get("time") or {}
+    real_stamp = (times.get("real") or {}).get(key)
+    real = datetime.fromtimestamp(real_stamp, tz=timezone.utc) if real_stamp else None
+    status = (((row.get("status") or {}).get("generic")) or {}).get("status") or {}
+    text = str(status.get("text", "")).lower()
+    live = bool((row.get("status") or {}).get("live"))
+    if key == "arrival":
+        done = real is not None or text.startswith("landed")
+    else:
+        done = real is not None or live or text.startswith(("landed", "departed"))
+    return done, real
 
 
 def _leg_scheduled_and_estimated(
@@ -522,8 +544,10 @@ def refresh_leg_time(reg: str, event: FlightEvent) -> LegRefresh:
         delay = None
         if scheduled and estimated:
             delay = round((estimated - scheduled).total_seconds() / 60)
+        completed, real_time = _row_completed(best[1], key)
         return LegRefresh(
-            best[0], cancelled=row_is_cancelled(best[1]), delay_minutes=delay
+            best[0], cancelled=row_is_cancelled(best[1]), delay_minutes=delay,
+            completed=completed, real_time=real_time,
         )
 
     # Our aircraft no longer lists this flight. Ask about the flight itself:
