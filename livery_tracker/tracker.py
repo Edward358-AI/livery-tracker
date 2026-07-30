@@ -1,12 +1,30 @@
-"""Event scheduler and per-leg state machine.
+"""Event scheduler and per-leg state machine (mirror-and-verify).
+
+Three layers, each with a single owner of truth:
+
+  Pending legs   — a mirror of the schedule source. An hourly sync re-reads
+                   every tail that still has pending legs and adopts the
+                   source's times verbatim, cancels what it cancels, and
+                   withdraws legs it no longer lists. A failed fetch marks
+                   legs "unverified" — it never drops them.
+  Live legs      — ADS-B owns the present. Polling starts at T-1h; landings,
+                   departures, diversions and go-arounds are concluded from
+                   direct observation, never from the schedule.
+  Conclusions    — verified against the source ~25 minutes later. Direct
+                   observations stand even when the source disagrees; weak
+                   inferences (LOST, signal-loss guesses) defer to it.
+
+The one standing exception is the turnaround/position guard: when the
+source's own data is physically impossible (an ETD before the same tail's
+recorded landing, or the aircraft visibly parked at another airport), the
+leg is held in TURNAROUND_DELAY rather than mirrored blindly.
 
 Lifecycle per leg:
-  WAITING_2H  --(T-2h: re-scrape ETA/ETD)-->  WAITING_LIVE
-  WAITING_LIVE --(T-45m arr / T-15m dep)-->   LIVE (ADS-B poll every 120s)
-  LIVE --> LANDED / DEPARTED / LOST (terminal)
+  WAITING_2H / WAITING_LIVE --(T-1h)--> LIVE (ADS-B poll every 120s)
+  LIVE --> LANDED / DEPARTED / DIVERTED / LOST (terminal, then verified)
 
-Every state change re-renders the single daily digest message. All timers live
-in python-telegram-bot's JobQueue, so a restart only needs `rehydrate()` to
+Every state change re-renders the daily digest message. All timers live in
+python-telegram-bot's JobQueue, so a restart only needs `rehydrate()` to
 re-register jobs from flights_today.json.
 """
 
@@ -33,11 +51,21 @@ from .resolver import resolve_aircraft
 
 log = logging.getLogger(__name__)
 
-REFRESH_LEAD = timedelta(hours=2)
-LIVE_LEAD = {EventType.ARRIVAL: timedelta(minutes=45), EventType.DEPARTURE: timedelta(minutes=15)}
+LIVE_LEAD = timedelta(hours=1)     # ADS-B polling starts at T-1h for both leg types
 POLL_INTERVAL = 120  # seconds
-LOST_TIMEOUT = timedelta(minutes=30)
+LOST_TIMEOUT = timedelta(minutes=30)   # never-seen past this: start asking the source why
 STALE_AFTER = timedelta(hours=12)  # events this far past schedule are purged at harvest
+
+# Hourly mirror sync: pending legs are reconciled against the source; legs
+# being tracked live belong to ADS-B and are never touched by the sync.
+SYNC_INTERVAL = 3600               # seconds
+DISCOVERY_INTERVAL = 3 * 3600      # boards-only sweep for new legs
+UNVERIFIED_NOTE = "unverified — source unreachable"
+WITHDRAWN_NOTE = "no longer scheduled for this aircraft"
+
+# Post-conclusion verification: compare our live-tracking verdict with the
+# source once its status page has had time to catch up.
+VERIFY_DELAY = timedelta(minutes=25)
 
 LANDED_MAX_ALT_FT = 500
 LANDED_MAX_DIST_NM = 5.0
@@ -74,7 +102,7 @@ def _digest(application: Application) -> DigestManager:
 
 
 def _cancel_jobs(application: Application, event_id: str) -> None:
-    for suffix in ("refresh", "live_start", "poll"):
+    for suffix in ("live_start", "poll", "verify"):
         for job in application.job_queue.get_jobs_by_name(f"{event_id}:{suffix}"):
             job.schedule_removal()
 
@@ -136,6 +164,50 @@ def _enter_turnaround_delay(event: FlightEvent) -> None:
     event.status_note = TURNAROUND_CONFLICT_NOTE
 
 
+# Position sanity: a departure can't happen if the aircraft is visibly parked
+# at some other airport. Only positive evidence counts — a dark transponder
+# proves nothing (the aircraft may simply be powered down at its gate).
+POSITION_CONFLICT_MIN_DIST_NM = 50.0
+POSITION_CHECK_LEAD = timedelta(hours=2)   # how close to ETD the sync checks position
+
+
+def _position_conflict_note(
+    event: FlightEvent, telemetry: Telemetry | None, airport: dict
+) -> str:
+    """A note when live ADS-B contradicts this departure, else ""."""
+    if event.type != EventType.DEPARTURE or telemetry is None:
+        return ""
+    if not telemetry.on_ground:
+        return ""   # airborne aircraft are judged by the callsign guard instead
+    if airport.get("lat") is None:
+        return ""
+    dist = haversine_nm(telemetry.lat, telemetry.lon, airport["lat"], airport["lon"])
+    if dist <= POSITION_CONFLICT_MIN_DIST_NM:
+        return ""
+    where = airport_db.nearest(telemetry.lat, telemetry.lon)
+    place = (where.iata or where.icao) if where else f"{dist:.0f} NM away"
+    return f"aircraft seen on the ground near {place} — awaiting schedule update"
+
+
+NO_SHOW_GRACE = timedelta(minutes=10)
+ARRIVAL_LATE_MIN_DIST_NM = 40.0
+
+
+def _no_show_note(event: FlightEvent, now: datetime) -> str:
+    """Label an aircraft that is dark past its scheduled time as likely delayed.
+
+    The state machine keeps polling — this only makes the digest honest about
+    a departure the source still calls "on time" while nothing is moving.
+    """
+    if event.last_telemetry.get("lat") is not None:
+        return ""
+    if now <= event.scheduled_time + NO_SHOW_GRACE:
+        return ""
+    late = round((now - event.scheduled_time).total_seconds() / 60)
+    kind = "ETD" if event.type == EventType.DEPARTURE else "ETA"
+    return f"no ADS-B contact {late}m past {kind} — likely delayed"
+
+
 # Airline designators are fixed-width by standard, which is what makes this
 # separable at all: an ICAO designator (used in ADS-B callsigns) is exactly
 # three letters, and an IATA designator (used in published schedules) is
@@ -178,14 +250,12 @@ def _callsign_matches_flight(callsign: str | None, flight_number: str) -> bool:
     return not seen or not expected or seen == expected
 
 
-async def _mark_swapped(
-    application: Application, event: FlightEvent, note: str, cascade: bool = True
-) -> None:
-    """End a leg the aircraft is no longer operating, and check its siblings.
+async def _mark_swapped(application: Application, event: FlightEvent, note: str) -> None:
+    """End a leg the aircraft is no longer operating.
 
-    An aircraft taken off one flight has usually lost the rest of that
-    rotation too, so the tail's other pending legs are re-verified rather
-    than left sitting in the digest until each reaches its own T-2h check.
+    No cascade is needed any more: the hourly sync reconciles every pending
+    leg of every tail against the source, so a stale sibling cannot outlive
+    the next sync pass.
     """
     store: FlightStore = application.bot_data["store"]
     event.status = EventState.SWAPPED
@@ -194,41 +264,7 @@ async def _mark_swapped(
     append_history(event)
     _cancel_jobs(application, event.id)
     log.info("Leg %s dropped: %s", event.id, note)
-
-    if cascade:
-        await _recheck_rotation(application, event.tail, skip_id=event.id)
     await _digest(application).refresh()
-
-
-async def _recheck_rotation(
-    application: Application, tail: str, skip_id: str | None = None
-) -> int:
-    """Re-verify a tail's other pending legs after a confirmed swap.
-
-    fetch_flight_list memoises for five minutes, so these checks normally
-    reuse the rows already fetched and cost no extra requests.
-    """
-    store: FlightStore = application.bot_data["store"]
-    siblings = [
-        ev for ev in store.events.values()
-        if ev.tail == tail
-        and ev.id != skip_id
-        and ev.status in (EventState.WAITING_2H, EventState.WAITING_LIVE)
-    ]
-    dropped = 0
-    for sibling in siblings:
-        refresh = await asyncio.to_thread(
-            schedule_provider.refresh_leg_time, sibling.tail, sibling
-        )
-        if refresh.swapped:
-            # cascade=False: one pass is enough, and it keeps this bounded.
-            await _mark_swapped(
-                application, sibling, "now flown by another aircraft", cascade=False
-            )
-            dropped += 1
-    if dropped:
-        log.info("Rotation re-check dropped %d further leg(s) for %s", dropped, tail)
-    return dropped
 
 
 # ---------------------------------------------------------------------------
@@ -243,49 +279,15 @@ def schedule_event_jobs(application: Application, event: FlightEvent) -> None:
     now = _now()
     _cancel_jobs(application, event.id)
 
-    if event.status == EventState.WAITING_2H:
-        when = max(event.scheduled_time - REFRESH_LEAD, now + timedelta(seconds=10))
-        jq.run_once(job_refresh, when=when, name=f"{event.id}:refresh", data=event.id)
-    elif event.status == EventState.WAITING_LIVE:
-        when = max(event.scheduled_time - LIVE_LEAD[event.type], now + timedelta(seconds=10))
+    if event.status in (EventState.WAITING_2H, EventState.WAITING_LIVE):
+        # Both waiting states behave identically now: the hourly sync owns
+        # schedule freshness, so the only timer left is the T-1h live start.
+        when = max(event.scheduled_time - LIVE_LEAD, now + timedelta(seconds=10))
         jq.run_once(job_live_start, when=when, name=f"{event.id}:live_start", data=event.id)
     elif event.status in (EventState.LIVE, EventState.TURNAROUND_DELAY):
         jq.run_repeating(
             job_poll, interval=POLL_INTERVAL, first=5, name=f"{event.id}:poll", data=event.id
         )
-
-
-async def job_refresh(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """T-2h: re-scrape the schedule, update ETA/ETD, refresh the digest."""
-    application = context.application
-    store: FlightStore = application.bot_data["store"]
-    event = store.get(context.job.data)
-    if event is None or event.status.terminal:
-        return
-
-    already_conflicted = _has_turnaround_conflict(store, event)
-    result = await asyncio.to_thread(schedule_provider.refresh_leg_time, event.tail, event)
-    if result.cancelled:
-        event.status = EventState.CANCELLED
-        store.upsert(event)
-        append_history(event)
-        await _digest(application).refresh()
-        log.info("Flight cancelled: %s", event.id)
-        return
-    if result.swapped and not already_conflicted:
-        # The flight is operating, just not with our aircraft. End the leg here:
-        # letting it reach live tracking would watch the *aircraft* rather than
-        # the flight, and report a departure/landing from whatever it really flew.
-        await _mark_swapped(application, event, "now flown by another aircraft")
-        return
-    _apply_schedule(event, result)
-    if _has_turnaround_conflict(store, event):
-        _enter_turnaround_delay(event)
-    else:
-        event.status = EventState.WAITING_LIVE
-    store.upsert(event)
-    await _digest(application).refresh()
-    schedule_event_jobs(application, event)
 
 
 def _apply_schedule(event: FlightEvent, result: schedule_provider.LegRefresh) -> None:
@@ -310,30 +312,13 @@ def _apply_schedule(event: FlightEvent, result: schedule_provider.LegRefresh) ->
 
 
 async def job_live_start(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """T-1h: hand the leg to ADS-B. No network — the hourly sync keeps the
+    schedule current, so this only gates on the store-local turnaround check."""
     application = context.application
     store: FlightStore = application.bot_data["store"]
     event = store.get(context.job.data)
     if event is None or event.status.terminal:
         return
-
-    # One last schedule read before we start believing ADS-B. Estimates firm
-    # up close to the event, so this is where a T-2h figure that has since
-    # improved gets corrected — and a late swap or cancellation gets caught.
-    already_conflicted = _has_turnaround_conflict(store, event)
-    result = await asyncio.to_thread(
-        schedule_provider.refresh_leg_time, event.tail, event
-    )
-    if result.cancelled:
-        event.status = EventState.CANCELLED
-        store.upsert(event)
-        append_history(event)
-        await _digest(application).refresh()
-        log.info("Flight cancelled before live tracking: %s", event.id)
-        return
-    if result.swapped and not already_conflicted:
-        await _mark_swapped(application, event, "now flown by another aircraft")
-        return
-    _apply_schedule(event, result)
 
     if _has_turnaround_conflict(store, event):
         _enter_turnaround_delay(event)
@@ -364,11 +349,10 @@ async def job_poll(context: ContextTypes.DEFAULT_TYPE) -> None:
     telemetry = await asyncio.to_thread(fetch_telemetry, event.tail)
     now = _now()
 
-    # A stale departure estimate can conflict with a landing we directly
-    # observed at the same airport. Keep checking both sources, but do not
-    # mistake the still-inbound callsign for a swap or invent a new ETD. The
-    # ordinary departure check only resumes once the expected flight is in
-    # the air.
+    # Source-conflict hold: the outbound estimate contradicts something we
+    # observed directly (the inbound landed after it, or the aircraft is
+    # visibly parked elsewhere). Keep re-reading the source, but only live
+    # evidence of the expected flight airborne releases the leg.
     if event.status == EventState.TURNAROUND_DELAY or _has_turnaround_conflict(store, event):
         refresh = await asyncio.to_thread(schedule_provider.refresh_leg_time, event.tail, event)
         if refresh.cancelled:
@@ -381,45 +365,91 @@ async def job_poll(context: ContextTypes.DEFAULT_TYPE) -> None:
             log.info("Flight cancelled while awaiting turnaround: %s", event.id)
             return
         _apply_schedule(event, refresh)
-        if _has_turnaround_conflict(store, event):
-            if telemetry is None or not _callsign_matches_flight(telemetry.callsign, event.flight_number) or telemetry.on_ground:
-                _enter_turnaround_delay(event)
+
+        airborne_as_ours = (
+            telemetry is not None
+            and not telemetry.on_ground
+            and _callsign_matches_flight(telemetry.callsign, event.flight_number)
+        )
+        if airborne_as_ours:
+            event.status = EventState.LIVE  # fall through to normal detection
+        else:
+            if _has_turnaround_conflict(store, event):
+                note = TURNAROUND_CONFLICT_NOTE
+            else:
+                note = await asyncio.to_thread(
+                    _position_conflict_note, event, telemetry, airport
+                )
+            if note:
+                if now > event.scheduled_time + LIVE_MAX_OVERRUN:
+                    event.status = EventState.LOST
+                    event.status_note = "gave up waiting"
+                    store.upsert(event)
+                    append_history(event)
+                    _schedule_verification(application, event)
+                    await _digest(application).refresh()
+                    context.job.schedule_removal()
+                    log.info("Leg %s abandoned while awaiting turnaround", event.id)
+                    return
+                event.status = EventState.TURNAROUND_DELAY
+                event.status_note = note
                 store.upsert(event)
                 await _digest(application).refresh()
                 return
-            event.status = EventState.LIVE
-        else:
+            # Conflict resolved but the flight is not airborne yet: wait normally.
             event.status = EventState.WAITING_LIVE
             store.upsert(event)
             await _digest(application).refresh()
             schedule_event_jobs(application, event)
-            log.info("Turnaround conflict cleared by a newer source estimate: %s", event.id)
+            log.info("Source conflict cleared for %s", event.id)
             return
 
     if telemetry is None:
+        never_seen = event.last_telemetry.get("lat") is None
+        if never_seen and now > event.scheduled_time + LOST_TIMEOUT:
+            # Dark past the deadline. Ask the source; if it offers no
+            # explanation, we still don't invent one — annotate "likely
+            # delayed" and keep polling until the hard cap.
+            refresh = await asyncio.to_thread(
+                schedule_provider.refresh_leg_time, event.tail, event
+            )
+            action = _apply_delay_pushback(event, refresh)
+            if action == "delayed":
+                store.upsert(event)
+                await _digest(application).refresh()
+                schedule_event_jobs(application, event)
+                context.job.schedule_removal()
+                log.info("Leg %s pushed back: %s", event.id, event.status_note)
+                return
+            if action == "cancelled":
+                event.status, event.status_note = EventState.CANCELLED, ""
+            elif action == "swapped":
+                event.status, event.status_note = EventState.SWAPPED, WITHDRAWN_NOTE
+            elif now > event.scheduled_time + LIVE_MAX_OVERRUN:
+                event.status, event.status_note = EventState.LOST, ""
+            else:
+                note = _no_show_note(event, now)
+                if note and event.status_note != note:
+                    event.status_note = note
+                    store.upsert(event)
+                    await _digest(application).refresh()
+                return
+            store.upsert(event)
+            append_history(event)
+            if event.status == EventState.LOST:
+                _schedule_verification(application, event)
+            await _digest(application).refresh()
+            context.job.schedule_removal()
+            log.info("Leg %s concluded without signal: %s", event.id, event.status.value)
+            return
+
         outcome = _conclude_dark_leg(event, now)
         if outcome is not None:
             state, note = outcome
-            if state == EventState.LOST and event.last_telemetry.get("lat") is None:
-                # Never seen and past deadline — but maybe it's just delayed.
-                refresh = await asyncio.to_thread(
-                    schedule_provider.refresh_leg_time, event.tail, event
-                )
-                action = _apply_delay_pushback(event, refresh)
-                if action == "delayed":
-                    store.upsert(event)
-                    await _digest(application).refresh()
-                    schedule_event_jobs(application, event)
-                    context.job.schedule_removal()
-                    log.info("Leg %s pushed back: %s", event.id, event.status_note)
-                    return
-                if action == "cancelled":
-                    state, note = EventState.CANCELLED, ""
-                elif action == "swapped":
-                    state, note = EventState.SWAPPED, "now flown by another aircraft"
             event.status, event.status_note = state, note
             store.upsert(event)
             append_history(event)
+            _schedule_verification(application, event)
             await _digest(application).refresh()
             context.job.schedule_removal()
             log.info("Leg %s concluded without signal: %s", event.id, event.status.value)
@@ -491,6 +521,20 @@ async def job_poll(context: ContextTypes.DEFAULT_TYPE) -> None:
             event.status_note = stamp
             finished = True
 
+    # Obvious-delay annotations: the aircraft is visibly not where an on-time
+    # flight would be. State is untouched — this only keeps the digest honest
+    # while the source still says "on time".
+    if not finished and now > event.scheduled_time + NO_SHOW_GRACE:
+        late = round((now - event.scheduled_time).total_seconds() / 60)
+        if (
+            event.type == EventType.ARRIVAL
+            and dist_nm is not None
+            and dist_nm > ARRIVAL_LATE_MIN_DIST_NM
+        ):
+            event.status_note = f"running {late}m late — {dist_nm:.0f} NM out"
+        elif event.type == EventType.DEPARTURE and telemetry.on_ground:
+            event.status_note = f"{late}m past ETD — still on the ground"
+
     # Hard cap: don't chase a leg that never resolves (holding forever, bad data).
     if not finished and now > event.scheduled_time + LIVE_MAX_OVERRUN:
         event.status = EventState.LOST
@@ -500,6 +544,7 @@ async def job_poll(context: ContextTypes.DEFAULT_TYPE) -> None:
     store.upsert(event)
     if finished:
         append_history(event)
+        _schedule_verification(application, event)
     await _digest(application).refresh()
     if finished:
         context.job.schedule_removal()
@@ -537,8 +582,9 @@ def _conclude_dark_leg(event: FlightEvent, now: datetime) -> tuple[EventState, s
     """
     last = event.last_telemetry
     if last.get("lat") is None:
-        # Never saw the aircraft at all.
-        if now > event.scheduled_time + LOST_TIMEOUT:
+        # Never saw the aircraft at all. job_poll owns the source re-checks
+        # and "likely delayed" annotation; here we only enforce the hard cap.
+        if now > event.scheduled_time + LIVE_MAX_OVERRUN:
             return EventState.LOST, ""
         return None
 
@@ -572,6 +618,145 @@ def _conclude_dark_leg(event: FlightEvent, now: datetime) -> tuple[EventState, s
     if now > event.scheduled_time + LIVE_MAX_OVERRUN:
         return EventState.LOST, "signal lost"
     return None
+
+
+# ---------------------------------------------------------------------------
+# Post-conclusion verification
+#
+# ~25 minutes after live tracking concludes a leg, its verdict is compared
+# with the source's row. Direct observations (a watched touchdown, a
+# double-confirmed diversion) stand even when the source disagrees; weak
+# inferences (LOST, signal-loss guesses) defer to whatever the source can
+# prove. Every check is logged to history.jsonl for auditing.
+# ---------------------------------------------------------------------------
+
+VERIFIABLE_STATES = (
+    EventState.LANDED, EventState.DEPARTED, EventState.DIVERTED, EventState.LOST
+)
+
+
+def _schedule_verification(application: Application, event: FlightEvent) -> None:
+    application.job_queue.run_once(
+        job_verify_conclusion, when=VERIFY_DELAY, name=f"{event.id}:verify", data=event.id
+    )
+
+
+def _conclusion_is_strong(event: FlightEvent) -> bool:
+    """Whether the conclusion rests on direct observation rather than inference."""
+    if event.status == EventState.LOST:
+        return False
+    return "signal lost" not in (event.status_note or "")
+
+
+def _row_status_text(row: dict) -> str:
+    status = (((row.get("status") or {}).get("generic")) or {}).get("status") or {}
+    return str(status.get("text", "")).lower()
+
+
+def _reconcile_conclusion(
+    event: FlightEvent, rows: list[dict], now: datetime
+) -> str | None:
+    """Compare a live-tracking conclusion with the source's row for the leg.
+
+    Returns "confirmed", "annotated", "corrected" or "revived" — the event is
+    mutated for the last three — or None when the source has no matching row
+    to compare against.
+    """
+    key = "arrival" if event.type == EventType.ARRIVAL else "departure"
+    best = schedule_provider._best_leg_row(rows, event)
+    if best is None:
+        return None
+    estimate, row = best
+    text = _row_status_text(row)
+    real_stamp = ((row.get("time") or {}).get("real") or {}).get(key)
+    real = datetime.fromtimestamp(real_stamp, tz=timezone.utc) if real_stamp else None
+    live = bool((row.get("status") or {}).get("live"))
+    if event.type == EventType.ARRIVAL:
+        # "live" means en route — that confirms a departure, not an arrival.
+        completed = real is not None or text.startswith("landed")
+    else:
+        completed = real is not None or live or text.startswith(("landed", "departed"))
+    says_diverted = "divert" in text
+    says_cancelled = "cancel" in text
+
+    if event.status in (EventState.LANDED, EventState.DEPARTED):
+        if says_diverted or says_cancelled:
+            if _conclusion_is_strong(event):
+                event.status_note = (event.status_note + " (source disagrees)").strip()
+                return "annotated"
+            event.status = EventState.DIVERTED if says_diverted else EventState.CANCELLED
+            event.status_note = "per source"
+            return "corrected"
+        if completed:
+            if real is not None and "signal lost" in (event.status_note or ""):
+                event.status_note = f"{fmt_local(real)} (confirmed by source)"
+                return "corrected"
+            return "confirmed"
+        # The source still shows the flight pending.
+        if _conclusion_is_strong(event):
+            return "confirmed"  # we watched it happen; the source just lags
+        if estimate > now:
+            event.status = EventState.WAITING_LIVE
+            event.scheduled_time = estimate
+            event.status_note = "reopened — source shows the flight still pending"
+            return "revived"
+        event.status_note = (event.status_note + " (unconfirmed by source)").strip()
+        return "annotated"
+
+    if event.status == EventState.DIVERTED:
+        if says_diverted:
+            return "confirmed"
+        # Two ground fixes far from the target beat a lagging status page.
+        event.status_note = (event.status_note + " (source disagrees)").strip()
+        return "annotated"
+
+    # LOST — inherently weak; adopt whatever the source can prove.
+    if says_cancelled:
+        event.status = EventState.CANCELLED
+        event.status_note = "per source"
+        return "corrected"
+    if completed:
+        event.status = (
+            EventState.LANDED if event.type == EventType.ARRIVAL else EventState.DEPARTED
+        )
+        stamp = real or estimate
+        event.status_note = f"~{fmt_local(stamp)} (per source)"
+        return "corrected"
+    if estimate > now:
+        event.status = EventState.WAITING_LIVE
+        event.scheduled_time = estimate
+        event.status_note = "reopened — source still expects this flight"
+        return "revived"
+    return "confirmed"  # neither of us can prove anything; LOST stands
+
+
+async def job_verify_conclusion(context: ContextTypes.DEFAULT_TYPE) -> None:
+    application = context.application
+    store: FlightStore = application.bot_data["store"]
+    event = store.get(context.job.data)
+    if event is None or event.status not in VERIFIABLE_STATES:
+        return
+    rows = await asyncio.to_thread(schedule_provider.fetch_flight_list, event.tail)
+    if rows is None:
+        log.info("Verification skipped for %s — source unreachable", event.id)
+        return
+    action = _reconcile_conclusion(event, rows, _now())
+    if action is None:
+        log.info("Verification for %s: no matching source row", event.id)
+        return
+    if action == "confirmed":
+        log.info("Verification for %s: source agrees (%s)", event.id, event.status.value)
+        return
+    store.upsert(event)
+    if action == "revived":
+        schedule_event_jobs(application, event)
+    else:
+        append_history(event)
+    await _digest(application).refresh()
+    log.info(
+        "Verification for %s: %s -> %s (%s)",
+        event.id, action, event.status.value, event.status_note,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -885,6 +1070,184 @@ async def purge_events(
 
 async def job_daily_harvest(context: ContextTypes.DEFAULT_TYPE) -> None:
     await run_harvest(context.application)
+
+
+# ---------------------------------------------------------------------------
+# Hourly mirror sync
+#
+# The invariant this maintains: a pending leg in the digest always reflects
+# what the source currently says, at most one hour stale. Legs being tracked
+# live belong to ADS-B and are never touched here. A failed fetch marks legs
+# "unverified" rather than dropping them — inconclusive is not gone.
+# ---------------------------------------------------------------------------
+
+SYNC_STATES = (
+    EventState.WAITING_2H, EventState.WAITING_LIVE, EventState.TURNAROUND_DELAY
+)
+
+
+async def job_hourly_sync(context: ContextTypes.DEFAULT_TYPE) -> None:
+    await run_schedule_sync(context.application)
+
+
+async def run_schedule_sync(application: Application) -> dict[str, int] | None:
+    """Reconcile every pending leg with the source. Returns per-action counts,
+    or None when a harvest was already running (it does the same work)."""
+    if _harvest_lock.locked():
+        log.info("Harvest in progress — hourly sync skipped")
+        return None
+    async with _harvest_lock:
+        return await _run_sync_locked(application)
+
+
+async def _run_sync_locked(application: Application) -> dict[str, int]:
+    store: FlightStore = application.bot_data["store"]
+    config: Config = application.bot_data["config"]
+    now = _now()
+    counts = {"tails": 0, "updated": 0, "withdrawn": 0, "cancelled": 0,
+              "unverified": 0, "discovered": 0, "conflicts": 0}
+    changed = False
+
+    pending_by_tail: dict[str, list[FlightEvent]] = {}
+    for ev in store.events.values():
+        if ev.status in SYNC_STATES:
+            pending_by_tail.setdefault(ev.tail, []).append(ev)
+
+    for tail, legs in pending_by_tail.items():
+        counts["tails"] += 1
+        rows = await asyncio.to_thread(schedule_provider.fetch_flight_list, tail)
+        if rows is None:
+            for leg in legs:
+                counts["unverified"] += 1
+                if leg.status_note != UNVERIFIED_NOTE:
+                    leg.status_note = UNVERIFIED_NOTE
+                    store.upsert(leg)
+                    changed = True
+            continue
+        schedule_provider.cache_rows(tail, rows)
+
+        for leg in legs:
+            if leg.status not in SYNC_STATES:
+                continue  # state moved while we were fetching
+            # refresh_leg_time re-reads the same memoised rows, so per-leg
+            # reconciliation costs no extra requests beyond the tail fetch.
+            refresh = await asyncio.to_thread(
+                schedule_provider.refresh_leg_time, tail, leg
+            )
+            if refresh.cancelled:
+                leg.status = EventState.CANCELLED
+                leg.status_note = ""
+                store.upsert(leg)
+                append_history(leg)
+                _cancel_jobs(application, leg.id)
+                counts["cancelled"] += 1
+                changed = True
+                continue
+            if refresh.swapped or refresh.new_time is None:
+                if (
+                    leg.status == EventState.TURNAROUND_DELAY
+                    or _has_turnaround_conflict(store, leg)
+                ):
+                    continue  # known-faulty source window: hold, don't withdraw
+                leg.status = EventState.SWAPPED
+                leg.status_note = (
+                    "now flown by another aircraft" if refresh.swapped else WITHDRAWN_NOTE
+                )
+                store.upsert(leg)
+                append_history(leg)
+                _cancel_jobs(application, leg.id)
+                counts["withdrawn"] += 1
+                changed = True
+                continue
+            # Present and running: mirror the source's time and delay figure.
+            old_time, old_note = leg.scheduled_time, leg.status_note
+            if leg.status_note == UNVERIFIED_NOTE:
+                leg.status_note = ""
+            _apply_schedule(leg, refresh)
+            if leg.scheduled_time != old_time or leg.status_note != old_note:
+                store.upsert(leg)
+                if leg.scheduled_time != old_time and leg.status in (
+                    EventState.WAITING_2H, EventState.WAITING_LIVE
+                ):
+                    schedule_event_jobs(application, leg)
+                counts["updated"] += 1
+                changed = True
+
+        # Free discovery: the rows are already here, so register any legs the
+        # boards/daily harvest have not seen yet (or whose time moved so far
+        # the reconciler withdrew the old copy).
+        livery = (config.watchlist.get(tail) or {}).get("livery", "")
+        events = schedule_provider.rows_to_events(tail, livery, rows, config, now=now)
+        created = _register_new_events(application, events)
+        if created:
+            counts["discovered"] += len(created)
+            changed = True
+
+        # Position sanity: a departure due soon while the aircraft is visibly
+        # parked at another airport is the source failing us — hold the leg.
+        due = next(
+            (
+                l for l in legs
+                if l.type == EventType.DEPARTURE
+                and l.status in (EventState.WAITING_2H, EventState.WAITING_LIVE)
+                and l.scheduled_time <= now + POSITION_CHECK_LEAD
+            ),
+            None,
+        )
+        if due is not None:
+            telemetry = await asyncio.to_thread(fetch_telemetry, tail)
+            airport = config.target_airports.get(due.target_airport) or {}
+            note = await asyncio.to_thread(
+                _position_conflict_note, due, telemetry, airport
+            )
+            if note:
+                due.status = EventState.TURNAROUND_DELAY
+                due.status_note = note
+                store.upsert(due)
+                schedule_event_jobs(application, due)
+                counts["conflicts"] += 1
+                changed = True
+                log.info("Position conflict for %s: %s", due.id, note)
+
+    if changed:
+        await _digest(application).refresh()
+    log.info(
+        "Hourly sync: %(tails)d tail(s) — %(updated)d updated, %(withdrawn)d "
+        "withdrawn, %(cancelled)d cancelled, %(discovered)d discovered, "
+        "%(conflicts)d position conflict(s), %(unverified)d unverified",
+        counts,
+    )
+    return counts
+
+
+async def job_board_discovery(context: ContextTypes.DEFAULT_TYPE) -> None:
+    await run_board_discovery(context.application)
+
+
+async def run_board_discovery(application: Application) -> int | None:
+    """Boards-only sweep for legs on tails with nothing currently pending.
+
+    Flat cost (a few requests per airport) regardless of watchlist size; the
+    per-tail authoritative sweep still happens at the daily harvest.
+    """
+    if _harvest_lock.locked():
+        log.info("Harvest in progress — board discovery skipped")
+        return None
+    async with _harvest_lock:
+        config: Config = application.bot_data["config"]
+        if not (config.watchlist and config.target_airports):
+            return 0
+        board_events, ok = await asyncio.to_thread(
+            schedule_provider.harvest_airport_boards, config
+        )
+        created = _register_new_events(application, board_events)
+        if created:
+            await _digest(application).refresh()
+        log.info(
+            "Board discovery: %d new leg(s)%s",
+            len(created), "" if ok else " (some boards unavailable)",
+        )
+        return len(created)
 
 
 # ---------------------------------------------------------------------------

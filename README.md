@@ -18,9 +18,11 @@ from [OurAirports](https://ourairports.com).
    tail's schedule and posts **one digest message** listing every matching
    arrival/departure leg — and deletes yesterday's digest, so the digest chat only
    ever contains a single message.
-3. **That single digest is edited in place** as the day unfolds — schedule re-checks
-   at T-2h, live altitude/speed/distance every 2 minutes near the scheduled time,
-   and final ✅ Landed / 🛫 Departed statuses per leg.
+3. **That single digest is edited in place** as the day unfolds — an hourly sync
+   mirrors every pending leg against the source (times, delays, cancellations,
+   withdrawn legs), live altitude/speed/distance every 2 minutes from T-1h, final
+   ✅ Landed / 🛫 Departed statuses per leg, and a cross-check of every conclusion
+   against the source ~25 minutes later.
 4. **Two bots, two clean chats** — a command bot for managing the fleet/airports and
    a dedicated digest bot that only carries the daily digest. If a flight connects
    two of your airports (say SFO ➔ LAX), it appears as two independent legs: a
@@ -259,15 +261,19 @@ Updated 7:57 PM PDT
 
 | Emoji | State | Meaning |
 |---|---|---|
-| 🟡 | Scheduled | Harvested; waiting for the T-2h schedule re-check |
-| 🕒 | Confirmed | Schedule re-checked at T-2h (shows `(delayed Xm)` if it moved) |
-| ⚠️ | Awaiting turnaround | The source ETD conflicts with this tail's inbound arrival; continuing schedule + ADS-B checks without guessing a new time |
-| 🚨 | Live | Polling ADS-B every 2 min — shows altitude · speed · distance |
+| 🟡 / 🕒 | Scheduled | Pending; mirrored against the source every hour (shows `delayed Xm` from the source's own figures) |
+| ⚠️ | Awaiting turnaround / conflict | The source's ETD is physically impossible (inbound landed later, or the aircraft is visibly at another airport); held without guessing a new time |
+| 🚨 | Live | Polling ADS-B every 2 min from T-1h — shows altitude · speed · distance |
 | ✅ | Landed | Touched down at your airport (or concluded from signal loss on approach) |
 | 🛫 | Departed | Climbed through 10,000 ft or left 15 NM (or concluded after going dark airborne) |
 | ↪️ | Diverted | Confirmed on the ground 30+ NM away — names the nearest airport |
-| ❌ | Cancelled | The airline cancelled the flight (caught at the T-2h re-check) |
-| ⚠️ | Lost | Never appeared on ADS-B by 30 min past its time (after a delay re-check) |
+| ❌ | Cancelled | The airline cancelled the flight (caught by the hourly sync) |
+| 🔀 | Swapped / withdrawn | The source no longer lists this leg for this aircraft |
+| ⚠️ | Lost | Never appeared on ADS-B by 3 h past its time, and the source offered no explanation — then re-checked against the source afterwards |
+
+Every ✅/🛫/↪️/⚠️ conclusion is verified against the source ~25 minutes later:
+direct observations stand even if the source disagrees; weak inferences (a lost
+signal, a presumed landing) adopt whatever the source can prove.
 
 ### Sections — pick your layout with `/view`
 
@@ -351,20 +357,38 @@ a real departure at one end and a real arrival at the other.
   `/info` and `/add` have a 10s per-user cooldown and `/refresh` a 2-minute one,
   so repeat taps cost nothing — a second `/info` on the same tail makes **zero**
   network calls. Failures are never cached, so an outage still retries.
-- Live polling only runs in a short window around each flight (T-45m for arrivals,
-  T-15m for departures), once every 120 seconds.
+  The hourly sync only fetches tails that actually have pending legs, new-leg
+  discovery between harvests is a cheap boards-only sweep every 3 h, and the
+  watchlist is capped at 256 aircraft, so the request budget stays polite no
+  matter how the fleet grows.
+- Live polling only runs from T-1h until each leg concludes, once every 120 seconds.
 - **Telemetry coverage**: positions come from adsb.fi, then adsb.lol, and then other public ADSB sources if the former are unavailable.
-- **Delays**: harvest uses live estimated times; the T-2h re-check updates them; and
-  a flight that hasn't shown up 30 min past its time gets one more schedule check —
-  if it moved later, the leg waits for the new time instead of being marked lost.
-- **Cancellations** are detected at the T-2h schedule re-check (❌ in the digest),
+- **The hourly mirror sync**: every tail that still has pending legs is re-read once
+  an hour and reconciled with the source — times and delay figures are adopted
+  verbatim, cancellations become ❌, and a leg the source no longer lists is
+  withdrawn (🔀). A failed fetch marks legs *unverified* instead of dropping them.
+  Legs already being tracked live belong to ADS-B and are never touched by the sync.
+- **Delays**: delay figures always come from the source's own scheduled-vs-estimated
+  pair. A flight that hasn't shown up 30 min past its time gets extra schedule
+  checks — if it moved later, the leg waits for the new time; if the source offers
+  no explanation, the digest says *likely delayed* rather than inventing an outcome.
+- **Position sanity**: if a departure is due within 2 h but the aircraft's
+  transponder shows it on the ground 50+ NM away, the leg is held (⚠️) until the
+  schedule catches up or the real flight is seen airborne — a dark transponder is
+  never treated as evidence.
+- **Cancellations** are detected by the hourly sync (❌ in the digest),
   with a by-flight-number fallback.
 - **Diversions**: an arrival confirmed on the ground 30+ NM from your airport on two
   consecutive polls is marked ↪️ *diverted*, with the nearest sizeable airport named.
 - **Signal loss**: ADS-B coverage is patchy near the ground, so a plane last seen low
   and close that goes dark is concluded ✅ *landed (signal lost on approach)*; one
-  that never shows up at all is ⚠️ *lost* 30 min past schedule, and every live leg
-  has a 3-hour hard stop.
+  that never shows up at all is annotated *likely delayed* and only marked ⚠️ *lost*
+  at the 3-hour hard stop every live leg has.
+- **Conclusion verification**: ~25 minutes after any ✅/🛫/↪️/⚠️ verdict, the leg is
+  compared with the source's row. Direct observations stand even when the source
+  disagrees (a confirmed diversion the source doesn't show stays a diversion); weak
+  inferences defer — a *lost* leg the source says landed becomes ✅ with the source's
+  real time, and one the source still expects is reopened for tracking.
 - **Source outages**: schedules are cached for 12h to ride out potential failures in the data. If every schedule source fails, you get a warning from the command bot
   and **ADS-B watch mode** takes over — the tracker polls your tails' live positions
   every 15 minutes, resolves routes from callsigns via the free adsbdb.com API, and

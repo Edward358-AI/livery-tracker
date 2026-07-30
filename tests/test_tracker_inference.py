@@ -9,6 +9,7 @@ from livery_tracker.tracker import (
     _apply_delay_pushback,
     _callsign_matches_flight,
     _conclude_dark_leg,
+    _no_show_note,
 )
 
 
@@ -52,10 +53,36 @@ def test_never_seen_before_deadline_keeps_polling():
     assert _conclude_dark_leg(ev, NOW) is None
 
 
-def test_never_seen_past_deadline_is_lost():
+def test_never_seen_past_deadline_is_not_concluded_early():
+    """A dark aircraft 45 minutes late is "likely delayed", not LOST — the
+    source re-checks and the hard cap in job_poll own this case now."""
     ev = make_live_event(EventType.ARRIVAL, NOW - timedelta(minutes=45), NEVER_SEEN)
+    assert _conclude_dark_leg(ev, NOW) is None
+
+
+def test_never_seen_past_hard_cap_is_lost():
+    ev = make_live_event(
+        EventType.ARRIVAL, NOW - LIVE_MAX_OVERRUN - timedelta(minutes=1), NEVER_SEEN
+    )
     state, _ = _conclude_dark_leg(ev, NOW)
     assert state == EventState.LOST
+
+
+def test_no_show_note_labels_a_dark_departure_as_likely_delayed():
+    ev = make_live_event(EventType.DEPARTURE, NOW - timedelta(minutes=25), NEVER_SEEN)
+    note = _no_show_note(ev, NOW)
+    assert "25m past ETD" in note and "likely delayed" in note
+
+
+def test_no_show_note_stays_quiet_inside_the_grace_period():
+    ev = make_live_event(EventType.DEPARTURE, NOW - timedelta(minutes=5), NEVER_SEEN)
+    assert _no_show_note(ev, NOW) == ""
+
+
+def test_no_show_note_stays_quiet_once_the_aircraft_was_seen():
+    ev = make_live_event(EventType.ARRIVAL, NOW - timedelta(minutes=25),
+                         seen(8, alt=34000, dist_nm=300.0))
+    assert _no_show_note(ev, NOW) == ""
 
 
 def test_dark_on_approach_becomes_landed():

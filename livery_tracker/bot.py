@@ -80,6 +80,9 @@ def _config(context: ContextTypes.DEFAULT_TYPE) -> Config:
 
 
 MAX_LISTED_LEGS = 15  # keeps the reply inside Telegram's message limit
+# Hard ceiling on watched tails: keeps the hourly sync and daily harvest
+# within a polite request budget no matter how enthusiastic the spotters get.
+MAX_WATCHLIST = 256
 TELEGRAM_CAPTION_LIMIT = 1024
 
 
@@ -219,6 +222,13 @@ async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     config = _config(context)
     if tail in config.watchlist:
         await _reply_parts(update.message, f"{tail} is already on the watchlist.")
+        return
+    if len(config.watchlist) >= MAX_WATCHLIST:
+        await _reply_parts(
+            update.message,
+            f"The watchlist is full ({MAX_WATCHLIST} aircraft). "
+            "Remove one with /remove before adding another.",
+        )
         return
     if await _rate_limited(update, "add"):
         return
@@ -439,7 +449,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     active = store.active()
     lines = [
         "<b>📊 Tracker status</b>",
-        f"• Watched tails: {len(config.watchlist)}",
+        f"• Watched tails: {len(config.watchlist)}/{MAX_WATCHLIST}",
         f"• Target airports: {', '.join(sorted(config.target_airports)) or 'none'}",
         f"• Digest layout: {config.digest_group_by} (/view to change)",
         f"• Active flight legs today: {len(active)}",

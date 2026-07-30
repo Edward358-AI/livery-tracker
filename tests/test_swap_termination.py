@@ -8,7 +8,6 @@ landing based on whatever the aircraft actually flew.
 
 import asyncio
 from datetime import datetime, timedelta, timezone
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import livery_tracker.tracker as tracker
@@ -52,17 +51,21 @@ def ghost_leg() -> FlightEvent:
 
 
 def run_refresh(app, event, refresh_result):
-    """Drive job_refresh with a canned schedule answer."""
+    """Drive the hourly sync (the T-2h refresh's replacement) with a canned answer."""
     import livery_tracker.schedule_provider as sp
 
-    original = sp.refresh_leg_time
+    originals = (
+        sp.fetch_flight_list, sp.refresh_leg_time, sp.cache_rows, tracker.fetch_telemetry
+    )
+    sp.fetch_flight_list = lambda q, fetch_by="reg": []
     sp.refresh_leg_time = lambda reg, ev: refresh_result
+    sp.cache_rows = lambda reg, rows: None
+    tracker.fetch_telemetry = lambda reg: None
     try:
-        job = SimpleNamespace(data=event.id)
-        ctx = SimpleNamespace(application=app, job=job)
-        asyncio.run(tracker.job_refresh(ctx))
+        asyncio.run(tracker.run_schedule_sync(app))
     finally:
-        sp.refresh_leg_time = original
+        (sp.fetch_flight_list, sp.refresh_leg_time, sp.cache_rows,
+         tracker.fetch_telemetry) = originals
 
 
 def test_swapped_leg_becomes_terminal_and_stops_tracking():
@@ -95,7 +98,8 @@ def test_normal_delay_still_proceeds_to_live_tracking():
 
     The delay figure comes from the source's own scheduled-vs-estimated
     pair, carried on LegRefresh, rather than from drift against whatever we
-    happened to store last.
+    happened to store last. The sync mirrors it and the leg stays pending
+    for its T-1h live start.
     """
     store = FlightStore()
     event = ghost_leg()
@@ -105,8 +109,8 @@ def test_normal_delay_still_proceeds_to_live_tracking():
     run_refresh(app, event, LegRefresh(NOW + timedelta(minutes=20), delay_minutes=20))
 
     survivor = store.get(event.id)
-    assert survivor.status == EventState.WAITING_LIVE
     assert not survivor.status.terminal
+    assert survivor.scheduled_time == NOW + timedelta(minutes=20)
     assert "delayed 20m" in survivor.status_note
 
 

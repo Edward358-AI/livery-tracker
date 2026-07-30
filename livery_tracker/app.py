@@ -96,7 +96,22 @@ def build_application(creds: Credentials) -> Application:
         time=dt_time(hour=4, minute=0, tzinfo=local_tz),
         name="update_check",
     )
-    log.info("Daily harvest scheduled for %02d:%02d local time", hour, minute)
+    # The mirror layer: hourly reconciliation of pending legs against the
+    # source, plus a cheap boards-only sweep for newly scheduled legs. Both
+    # share the harvest lock, so they skip themselves when a harvest runs.
+    application.job_queue.run_repeating(
+        tracker.job_hourly_sync, interval=tracker.SYNC_INTERVAL, first=900,
+        name="hourly_sync",
+    )
+    application.job_queue.run_repeating(
+        tracker.job_board_discovery, interval=tracker.DISCOVERY_INTERVAL, first=3600,
+        name="board_discovery",
+    )
+    log.info(
+        "Daily harvest scheduled for %02d:%02d local time; "
+        "hourly schedule sync and 3-hourly board discovery armed",
+        hour, minute,
+    )
     return application
 
 

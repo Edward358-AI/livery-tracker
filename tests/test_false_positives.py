@@ -175,6 +175,16 @@ def rotation_legs() -> list[FlightEvent]:
     ]
 
 
+def sync_with(monkeypatch, app, refresh):
+    """Drive the hourly sync (which replaced the T-2h refresh + cascade)."""
+    monkeypatch.setattr(tracker.schedule_provider, "fetch_flight_list",
+                        lambda q, fetch_by="reg": [])
+    monkeypatch.setattr(tracker.schedule_provider, "cache_rows", lambda reg, rows: None)
+    monkeypatch.setattr(tracker.schedule_provider, "refresh_leg_time", refresh)
+    monkeypatch.setattr(tracker, "fetch_telemetry", lambda reg: None)
+    asyncio.run(tracker.run_schedule_sync(app))
+
+
 def test_swap_drops_the_rest_of_the_rotation(monkeypatch):
     store, config = FlightStore(), make_config()
     arr, dep = rotation_legs()
@@ -183,12 +193,8 @@ def test_swap_drops_the_rest_of_the_rotation(monkeypatch):
     app = FakeApp(store, config)
 
     # FR24 no longer lists either flight for this tail; both still operate.
-    monkeypatch.setattr(sp, "refresh_leg_time", lambda reg, ev: LegRefresh(None, swapped=True))
-    monkeypatch.setattr(tracker.schedule_provider, "refresh_leg_time",
-                        lambda reg, ev: LegRefresh(None, swapped=True))
-
-    ctx = SimpleNamespace(application=app, job=SimpleNamespace(data=arr.id))
-    asyncio.run(tracker.job_refresh(ctx))
+    # The hourly sync reconciles the whole rotation in one pass.
+    sync_with(monkeypatch, app, lambda reg, ev: LegRefresh(None, swapped=True))
 
     assert store.get("arr").status == EventState.SWAPPED
     assert store.get("dep").status == EventState.SWAPPED, "downstream leg should go too"
@@ -247,7 +253,7 @@ def test_scheduled_and_estimated_extraction():
 
 
 def test_rotation_recheck_keeps_legs_the_aircraft_still_operates(monkeypatch):
-    """Only legs the source confirms as swapped are dropped."""
+    """Only legs the source confirms as gone are dropped."""
     store, config = FlightStore(), make_config()
     arr, dep = rotation_legs()
     store.upsert(arr)
@@ -259,10 +265,7 @@ def test_rotation_recheck_keeps_legs_the_aircraft_still_operates(monkeypatch):
             return LegRefresh(None, swapped=True)
         return LegRefresh(ev.scheduled_time)      # still ours
 
-    monkeypatch.setattr(tracker.schedule_provider, "refresh_leg_time", selective)
-
-    ctx = SimpleNamespace(application=app, job=SimpleNamespace(data=arr.id))
-    asyncio.run(tracker.job_refresh(ctx))
+    sync_with(monkeypatch, app, selective)
 
     assert store.get("arr").status == EventState.SWAPPED
     assert store.get("dep").status == EventState.WAITING_2H, "must not drop a valid leg"

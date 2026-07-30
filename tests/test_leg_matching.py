@@ -1,4 +1,4 @@
-"""Leg re-matching at the T-2h refresh.
+"""Leg re-matching at reconciliation time (the hourly sync's per-leg lookup).
 
 Regression cover for the UA1116 incident: N475UA was harvested as operating
 UA1116 SFO->AUS, United later swapped the tail onto UA1265 SFO->SEA, and the

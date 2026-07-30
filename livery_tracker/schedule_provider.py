@@ -506,7 +506,10 @@ def _best_leg_row(
 
 
 def refresh_leg_time(reg: str, event: FlightEvent) -> LegRefresh:
-    """T-2h re-scrape: current best ETA/ETD (and cancellation flag) for a leg.
+    """Current best ETA/ETD (and cancellation flag) for one leg.
+
+    The reconciliation primitive of the hourly sync (and of the poll-time
+    re-checks while a leg is held in a source conflict).
 
     FR24 unassigns the registration from cancelled flights, so if the by-reg
     list no longer carries this leg, re-check by flight number — that's where
