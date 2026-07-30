@@ -267,6 +267,134 @@ def test_poll_returns_a_stale_hold_to_normal_waiting(monkeypatch):
     assert store.get(outbound.id).status == EventState.WAITING_LIVE
 
 
+def live_departure(number="AS656", dest="SEA", when=None) -> FlightEvent:
+    return FlightEvent(
+        id=number.lower(), tail="N985AK", livery="", type=EventType.DEPARTURE,
+        target_airport="SFO", scheduled_time=when or (NOW + timedelta(minutes=50)),
+        route_origin="SFO", route_destination=dest, flight_number=number,
+        status=EventState.LIVE,
+    )
+
+
+def test_stale_gate_callsign_is_not_a_swap(monkeypatch):
+    """N985AK as observed: parked at its SFO gate still squawking the
+    inbound's ASA725 while its own AS656 was live — hold, never swap."""
+    store, config = FlightStore(), sfo_config()
+    leg = live_departure()
+    store.upsert(leg)
+    app = FakeApp(store, config)
+    monkeypatch.setattr(
+        tracker.schedule_provider, "refresh_leg_time",
+        lambda reg, event: LegRefresh(event.scheduled_time, delay_minutes=25),
+    )
+    monkeypatch.setattr(
+        tracker, "fetch_telemetry",
+        lambda reg: Telemetry(lat=37.6198, lon=-122.3748, alt_ft=0, on_ground=True,
+                              gs_kts=0.0, baro_rate=None, callsign="ASA725", source="test"),
+    )
+
+    asyncio.run(tracker.job_poll(context_for(app, leg)))
+
+    survivor = store.get(leg.id)
+    assert survivor.status == EventState.TURNAROUND_DELAY
+    assert "still operating ASA725" in survivor.status_note
+
+
+def test_airborne_on_its_late_inbound_is_not_a_swap(monkeypatch):
+    """N8619F as observed: WN3496 went live at T-1h while the tail was still
+    flying its late inbound WN3982 — hold for the rotation."""
+    store, config = FlightStore(), sfo_config()
+    leg = live_departure(number="WN3496", dest="SAN", when=NOW - timedelta(minutes=10))
+    leg.tail = "N8619F"
+    store.upsert(leg)
+    app = FakeApp(store, config)
+    monkeypatch.setattr(
+        tracker.schedule_provider, "refresh_leg_time",
+        lambda reg, event: LegRefresh(NOW + timedelta(minutes=40), delay_minutes=50),
+    )
+    monkeypatch.setattr(
+        tracker, "fetch_telemetry",
+        lambda reg: Telemetry(lat=36.9, lon=-121.2, alt_ft=22_000, on_ground=False,
+                              gs_kts=410.0, baro_rate=-800, callsign="SWA3982", source="test"),
+    )
+
+    asyncio.run(tracker.job_poll(context_for(app, leg)))
+
+    survivor = store.get(leg.id)
+    assert survivor.status == EventState.TURNAROUND_DELAY
+    assert "still operating SWA3982" in survivor.status_note
+    assert survivor.scheduled_time == NOW + timedelta(minutes=40), \
+        "the source's delayed time must be mirrored while holding"
+
+
+def test_mismatch_with_the_flight_truly_gone_is_still_a_swap(monkeypatch):
+    """The original poison case: the tail flies something else AND the source
+    no longer lists our flight for it — that ends the leg."""
+    store, config = FlightStore(), sfo_config()
+    leg = live_departure()
+    store.upsert(leg)
+    app = FakeApp(store, config)
+    monkeypatch.setattr(
+        tracker.schedule_provider, "refresh_leg_time",
+        lambda reg, event: LegRefresh(None, swapped=True),
+    )
+    monkeypatch.setattr(
+        tracker, "fetch_telemetry",
+        lambda reg: Telemetry(lat=36.9, lon=-121.2, alt_ft=22_000, on_ground=False,
+                              gs_kts=410.0, baro_rate=0, callsign="ASA9999", source="test"),
+    )
+
+    asyncio.run(tracker.job_poll(context_for(app, leg)))
+
+    assert store.get(leg.id).status == EventState.SWAPPED
+
+
+def test_held_leg_withdraws_once_the_source_drops_it(monkeypatch):
+    """A foreign-callsign hold is not the known-faulty-source window: if the
+    source stops listing the leg, trust it and withdraw."""
+    store, config = FlightStore(), sfo_config()
+    leg = live_departure()
+    leg.status = EventState.TURNAROUND_DELAY
+    leg.status_note = "aircraft still operating ASA725 — awaiting rotation"
+    store.upsert(leg)  # no inbound in the store: no genuine conflict
+    app = FakeApp(store, config)
+    monkeypatch.setattr(
+        tracker.schedule_provider, "refresh_leg_time",
+        lambda reg, event: LegRefresh(None, swapped=True),
+    )
+    monkeypatch.setattr(tracker, "fetch_telemetry", lambda reg: None)
+
+    asyncio.run(tracker.job_poll(context_for(app, leg)))
+
+    survivor = store.get(leg.id)
+    assert survivor.status == EventState.SWAPPED
+    assert survivor.status_note == tracker.WITHDRAWN_NOTE
+
+
+def test_foreign_callsign_keeps_the_hold_from_flapping(monkeypatch):
+    """While the old callsign persists, the hold must stay a hold — not fall
+    back to waiting and re-trip on the next poll."""
+    store, config = FlightStore(), sfo_config()
+    leg = live_departure()
+    leg.status = EventState.TURNAROUND_DELAY
+    leg.status_note = "aircraft still operating ASA725 — awaiting rotation"
+    store.upsert(leg)
+    app = FakeApp(store, config)
+    monkeypatch.setattr(
+        tracker.schedule_provider, "refresh_leg_time",
+        lambda reg, event: LegRefresh(event.scheduled_time),
+    )
+    monkeypatch.setattr(
+        tracker, "fetch_telemetry",
+        lambda reg: Telemetry(lat=37.6198, lon=-122.3748, alt_ft=0, on_ground=True,
+                              gs_kts=0.0, baro_rate=None, callsign="ASA725", source="test"),
+    )
+
+    asyncio.run(tracker.job_poll(context_for(app, leg)))
+
+    assert store.get(leg.id).status == EventState.TURNAROUND_DELAY
+
+
 def test_rebuild_harvest_retains_recently_overdue_estimated_departure():
     """A stale but explicitly estimated departure stays discoverable for six hours."""
     now = NOW

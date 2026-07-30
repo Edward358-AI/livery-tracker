@@ -227,6 +227,22 @@ def _position_conflict_note(
     return f"aircraft seen on the ground near {place} — awaiting schedule update"
 
 
+def _foreign_callsign_note(event: FlightEvent, telemetry: Telemetry | None) -> str:
+    """A note while the aircraft is positively operating a different flight.
+
+    Wearing the previous rotation's callsign — parked at the gate after a
+    late inbound, or still flying it — is evidence of "not yet", never of
+    "never": only the source may declare the leg gone.
+    """
+    if telemetry is None:
+        return ""
+    seen = _designator_digits(telemetry.callsign, _ICAO_CALLSIGN_RE)
+    expected = _designator_digits(event.flight_number, _IATA_FLIGHT_RE)
+    if seen and expected and seen != expected:
+        return f"aircraft still operating {telemetry.callsign.strip()} — awaiting rotation"
+    return ""
+
+
 NO_SHOW_GRACE = timedelta(minutes=10)
 ARRIVAL_LATE_MIN_DIST_NM = 40.0
 
@@ -440,9 +456,16 @@ async def job_poll(context: ContextTypes.DEFAULT_TYPE) -> None:
             if await asyncio.to_thread(_has_turnaround_conflict, store, event):
                 note = TURNAROUND_CONFLICT_NOTE
             else:
+                # No landing-vs-ETD impossibility, so the source is not in a
+                # known-faulty window: its word decides whether a held leg
+                # still exists at all.
+                if refresh.swapped or refresh.new_time is None:
+                    await _mark_swapped(application, event, WITHDRAWN_NOTE)
+                    context.job.schedule_removal()
+                    return
                 note = await asyncio.to_thread(
                     _position_conflict_note, event, telemetry, airport
-                )
+                ) or _foreign_callsign_note(event, telemetry)
             if note:
                 if now > event.scheduled_time + LIVE_MAX_OVERRUN:
                     event.status = EventState.LOST
@@ -518,15 +541,41 @@ async def job_poll(context: ContextTypes.DEFAULT_TYPE) -> None:
             log.info("Leg %s concluded without signal: %s", event.id, event.status.value)
         return
 
-    # A tail can have stale schedule assignments. Never use one aircraft's
-    # takeoff/landing to complete a different numbered flight — that was the
-    # cause of N8619F being shown as both WN3043 and WN4244 from one OAK
-    # departure. The mismatch is strong evidence the aircraft was swapped.
+    # A mismatched callsign means the aircraft is not flying THIS leg right
+    # now — most often because it is still on (or fresh off) the previous
+    # leg of its own rotation, wearing that flight's callsign. That proves
+    # "not yet", never "never": whether the leg is truly gone is the
+    # source's call. It still guards conclusions — foreign telemetry must
+    # never complete our leg (the original WN3043/WN4244 poison case).
     if not _callsign_matches_flight(telemetry.callsign, event.flight_number):
-        await _mark_swapped(
-            application, event, f"aircraft operating {telemetry.callsign} instead"
+        refresh = await asyncio.to_thread(
+            schedule_provider.refresh_leg_time, event.tail, event
         )
-        context.job.schedule_removal()
+        if refresh.cancelled:
+            event.status = EventState.CANCELLED
+            event.status_note = ""
+            store.upsert(event)
+            append_history(event)
+            await _digest(application).refresh()
+            context.job.schedule_removal()
+            log.info("Flight cancelled while on another leg: %s", event.id)
+            return
+        if refresh.swapped or refresh.new_time is None:
+            # Source-confirmed: the flight no longer runs with this aircraft.
+            await _mark_swapped(
+                application, event, f"aircraft operating {telemetry.callsign} instead"
+            )
+            context.job.schedule_removal()
+            return
+        # Still ours per the source: mirror its delay and hold for the rotation.
+        _apply_schedule(event, refresh)
+        event.status = EventState.TURNAROUND_DELAY
+        event.status_note = (
+            _foreign_callsign_note(event, telemetry) or TURNAROUND_CONFLICT_NOTE
+        )
+        store.upsert(event)
+        await _digest(application).refresh()
+        log.info("Holding %s: %s", event.id, event.status_note)
         return
 
     dist_nm = None
