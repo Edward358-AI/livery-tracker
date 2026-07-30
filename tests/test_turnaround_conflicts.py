@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 
 import livery_tracker.tracker as tracker
 from livery_tracker.adsb import Telemetry
+from livery_tracker.airports import Airport
 from livery_tracker.config import Config
 from livery_tracker.flights import EventState, EventType, FlightEvent, FlightStore
 from livery_tracker.schedule_provider import LegRefresh, rows_to_events
@@ -157,6 +158,113 @@ def test_turnaround_wait_ignores_inbound_callsign_until_own_flight_takes_off(mon
     )
     asyncio.run(tracker.job_poll(ctx))
     assert store.get(outbound.id).status == EventState.DEPARTED
+
+
+AIRPORT_COORDS = {"SFO": (37.6198, -122.3748), "PHX": (33.4342, -112.0117)}
+
+
+def fake_lookup(code):
+    if code in AIRPORT_COORDS:
+        lat, lon = AIRPORT_COORDS[code]
+        return Airport(icao="K" + code, iata=code, name=code, lat=lat, lon=lon, rank=4)
+    return None
+
+
+def out_and_back(now=None):
+    """The observed N27255 false positive: SFO->PHX held by its own return."""
+    now = now or NOW
+    outbound = FlightEvent(
+        id="ua2374", tail="N27255", livery="", type=EventType.DEPARTURE,
+        target_airport="SFO", scheduled_time=now + timedelta(hours=1),
+        route_origin="SFO", route_destination="PHX", flight_number="UA2374",
+        status=EventState.WAITING_LIVE,
+    )
+    dependent_return = FlightEvent(
+        id="ua2619", tail="N27255", livery="", type=EventType.ARRIVAL,
+        target_airport="SFO", scheduled_time=now + timedelta(hours=5),
+        route_origin="PHX", route_destination="SFO", flight_number="UA2619",
+        status=EventState.WAITING_2H,
+    )
+    return outbound, dependent_return
+
+
+def test_a_same_day_return_leg_is_not_a_turnaround_conflict(monkeypatch):
+    """The return arrives after the ETD by definition — that's the rotation
+    working. Only a gap too short for a round trip marks a real conflict."""
+    monkeypatch.setattr(tracker.airport_db, "lookup", fake_lookup)
+    store = FlightStore()
+    outbound, ret = out_and_back()
+    store.upsert(outbound)
+    store.upsert(ret)
+
+    assert tracker._has_turnaround_conflict(store, outbound) is False
+
+    app = FakeApp(store, sfo_config())
+    asyncio.run(tracker.job_live_start(context_for(app, outbound)))
+    assert store.get(outbound.id).status == EventState.LIVE
+
+
+def test_a_gap_too_short_for_a_round_trip_still_conflicts(monkeypatch):
+    """SFO->PHX with the 'return' due 1h after the ETD: the aircraft cannot
+    have flown out and back — the inbound must be a delayed prerequisite."""
+    monkeypatch.setattr(tracker.airport_db, "lookup", fake_lookup)
+    store = FlightStore()
+    outbound, ret = out_and_back()
+    ret.scheduled_time = outbound.scheduled_time + timedelta(hours=1)
+    store.upsert(outbound)
+    store.upsert(ret)
+
+    assert tracker._has_turnaround_conflict(store, outbound) is True
+
+
+def test_poll_releases_a_held_departure_taxiing_at_its_own_airport(monkeypatch):
+    """N27255 as observed live: held as a source conflict while sitting at SFO
+    broadcasting UAL2374 — positive proof there is no conflict."""
+    store, config = FlightStore(), sfo_config()
+    outbound, ret = out_and_back()
+    outbound.status = EventState.TURNAROUND_DELAY
+    outbound.status_note = tracker.TURNAROUND_CONFLICT_NOTE
+    outbound.scheduled_time = NOW - timedelta(minutes=30)
+    store.upsert(outbound)
+    store.upsert(ret)
+    app = FakeApp(store, config)
+    monkeypatch.setattr(
+        tracker.schedule_provider, "refresh_leg_time",
+        lambda reg, event: LegRefresh(event.scheduled_time),
+    )
+    monkeypatch.setattr(
+        tracker, "fetch_telemetry",
+        lambda reg: Telemetry(
+            lat=37.6109, lon=-122.3613, alt_ft=0, on_ground=True, gs_kts=9.0,
+            baro_rate=None, callsign="UAL2374", source="test",
+        ),
+    )
+
+    asyncio.run(tracker.job_poll(context_for(app, outbound)))
+
+    survivor = store.get(outbound.id)
+    assert survivor.status == EventState.LIVE
+    assert "still on the ground" in survivor.status_note
+
+
+def test_poll_returns_a_stale_hold_to_normal_waiting(monkeypatch):
+    """A hold whose conflict has evaporated (and no contrary position data)
+    must drop back to normal waiting, not stick forever."""
+    store, config = FlightStore(), sfo_config()
+    outbound, _ = out_and_back()
+    outbound.status = EventState.TURNAROUND_DELAY
+    outbound.status_note = tracker.TURNAROUND_CONFLICT_NOTE
+    store.upsert(outbound)  # no inbound in the store: nothing conflicts
+    app = FakeApp(store, config)
+    monkeypatch.setattr(
+        tracker.schedule_provider, "refresh_leg_time",
+        lambda reg, event: LegRefresh(event.scheduled_time),
+    )
+    monkeypatch.setattr(tracker, "fetch_telemetry", lambda reg: None)
+
+    asyncio.run(tracker.job_poll(context_for(app, outbound)))
+
+    assert store.get(outbound.id).status == EventState.WAITING_LIVE
 
 
 def test_rebuild_harvest_retains_recently_overdue_estimated_departure():

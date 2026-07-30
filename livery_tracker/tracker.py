@@ -131,12 +131,44 @@ def _arrival_can_precede_outbound(outbound: FlightEvent, inbound_time: datetime)
     return timedelta() < delay <= TURNAROUND_CONFLICT_MAX_LAG
 
 
+# Distinguishing a delayed prerequisite from the departure's own return leg:
+# on an out-and-back rotation (SFO->PHX then PHX->SFO) the return always
+# arrives "after the ETD" — that is the schedule working, not failing. The
+# tell is the gap: a dependent return needs at least a round trip's worth of
+# time; a prerequisite that has slipped past the ETD shows up much closer
+# (N475UA's genuine conflict was a 53-minute gap on a ~4h round trip).
+RETURN_MIN_ROUND_TRIP = timedelta(minutes=90)   # cheap floor, avoids lookups
+RETURN_CRUISE_KTS = 450.0
+RETURN_MIN_TURN = timedelta(minutes=30)
+
+
+def _is_plausible_dependent_return(
+    outbound: FlightEvent, inbound: FlightEvent, inbound_time: datetime
+) -> bool:
+    """Whether the inbound can be the outbound's own return leg."""
+    if inbound.route_origin != outbound.route_destination:
+        return False
+    gap = inbound_time - outbound.scheduled_time
+    if gap < RETURN_MIN_ROUND_TRIP:
+        return False
+    near = airport_db.lookup(outbound.route_origin)
+    far = airport_db.lookup(outbound.route_destination)
+    if near is None or far is None:
+        return False   # can't prove it — stay conservative and hold
+    dist = haversine_nm(near.lat, near.lon, far.lat, far.lon)
+    round_trip = timedelta(hours=2 * dist / RETURN_CRUISE_KTS) + RETURN_MIN_TURN
+    return gap >= round_trip
+
+
 def _has_turnaround_conflict(store: FlightStore, event: FlightEvent) -> bool:
     """Whether this outbound conflicts with the tail's inbound rotation.
 
     A tracker-confirmed landing is definitive. Before touchdown, an active
     inbound whose ETA is already after the outbound ETD is enough to flag an
     impossible source sequence, but never to manufacture a replacement time.
+    The tail's own dependent return leg is exempt — it always arrives after
+    the ETD, by design. May hit the local airport index; call via a thread
+    from async code.
     """
     if event.type != EventType.DEPARTURE:
         return False
@@ -148,11 +180,16 @@ def _has_turnaround_conflict(store: FlightStore, event: FlightEvent) -> bool:
         ):
             continue
         landed_at = _recorded_landing_time(inbound)
-        if landed_at is not None and _arrival_can_precede_outbound(event, landed_at):
+        if (
+            landed_at is not None
+            and _arrival_can_precede_outbound(event, landed_at)
+            and not _is_plausible_dependent_return(event, inbound, landed_at)
+        ):
             return True
         if (
             inbound.status in (EventState.WAITING_2H, EventState.WAITING_LIVE, EventState.LIVE)
             and _arrival_can_precede_outbound(event, inbound.scheduled_time)
+            and not _is_plausible_dependent_return(event, inbound, inbound.scheduled_time)
         ):
             return True
     return False
@@ -169,6 +206,7 @@ def _enter_turnaround_delay(event: FlightEvent) -> None:
 # proves nothing (the aircraft may simply be powered down at its gate).
 POSITION_CONFLICT_MIN_DIST_NM = 50.0
 POSITION_CHECK_LEAD = timedelta(hours=2)   # how close to ETD the sync checks position
+GATE_RELEASE_MAX_DIST_NM = 10.0  # on the ground this close to its own airport = it's here
 
 
 def _position_conflict_note(
@@ -250,6 +288,14 @@ def _callsign_matches_flight(callsign: str | None, flight_number: str) -> bool:
     return not seen or not expected or seen == expected
 
 
+def _callsign_confirms_flight(callsign: str | None, flight_number: str) -> bool:
+    """Positive proof (not mere absence of contradiction) that the aircraft
+    is operating this flight — both designators present and agreeing."""
+    seen = _designator_digits(callsign, _ICAO_CALLSIGN_RE)
+    expected = _designator_digits(flight_number, _IATA_FLIGHT_RE)
+    return bool(seen) and seen == expected
+
+
 async def _mark_swapped(application: Application, event: FlightEvent, note: str) -> None:
     """End a leg the aircraft is no longer operating.
 
@@ -320,7 +366,7 @@ async def job_live_start(context: ContextTypes.DEFAULT_TYPE) -> None:
     if event is None or event.status.terminal:
         return
 
-    if _has_turnaround_conflict(store, event):
+    if await asyncio.to_thread(_has_turnaround_conflict, store, event):
         _enter_turnaround_delay(event)
         store.upsert(event)
         schedule_event_jobs(application, event)
@@ -352,8 +398,12 @@ async def job_poll(context: ContextTypes.DEFAULT_TYPE) -> None:
     # Source-conflict hold: the outbound estimate contradicts something we
     # observed directly (the inbound landed after it, or the aircraft is
     # visibly parked elsewhere). Keep re-reading the source, but only live
-    # evidence of the expected flight airborne releases the leg.
-    if event.status == EventState.TURNAROUND_DELAY or _has_turnaround_conflict(store, event):
+    # evidence of the expected flight releases the leg: its callsign airborne,
+    # or the aircraft at its own departure gate already wearing that callsign.
+    conflicted = event.status == EventState.TURNAROUND_DELAY or await asyncio.to_thread(
+        _has_turnaround_conflict, store, event
+    )
+    if conflicted:
         refresh = await asyncio.to_thread(schedule_provider.refresh_leg_time, event.tail, event)
         if refresh.cancelled:
             event.status = EventState.CANCELLED
@@ -371,10 +421,23 @@ async def job_poll(context: ContextTypes.DEFAULT_TYPE) -> None:
             and not telemetry.on_ground
             and _callsign_matches_flight(telemetry.callsign, event.flight_number)
         )
-        if airborne_as_ours:
+        origin_dist = None
+        if telemetry is not None and airport.get("lat") is not None:
+            origin_dist = haversine_nm(
+                telemetry.lat, telemetry.lon, airport["lat"], airport["lon"]
+            )
+        at_origin_as_ours = (
+            event.type == EventType.DEPARTURE
+            and telemetry is not None
+            and telemetry.on_ground
+            and origin_dist is not None
+            and origin_dist <= GATE_RELEASE_MAX_DIST_NM
+            and _callsign_confirms_flight(telemetry.callsign, event.flight_number)
+        )
+        if airborne_as_ours or at_origin_as_ours:
             event.status = EventState.LIVE  # fall through to normal detection
         else:
-            if _has_turnaround_conflict(store, event):
+            if await asyncio.to_thread(_has_turnaround_conflict, store, event):
                 note = TURNAROUND_CONFLICT_NOTE
             else:
                 note = await asyncio.to_thread(
@@ -1144,9 +1207,8 @@ async def _run_sync_locked(application: Application) -> dict[str, int]:
                 changed = True
                 continue
             if refresh.swapped or refresh.new_time is None:
-                if (
-                    leg.status == EventState.TURNAROUND_DELAY
-                    or _has_turnaround_conflict(store, leg)
+                if leg.status == EventState.TURNAROUND_DELAY or await asyncio.to_thread(
+                    _has_turnaround_conflict, store, leg
                 ):
                     continue  # known-faulty source window: hold, don't withdraw
                 leg.status = EventState.SWAPPED
