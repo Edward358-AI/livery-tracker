@@ -32,6 +32,24 @@ class FakeMessage:
         self.photos.append(kwargs)
 
 
+def test_rebuild_is_rate_limited_and_hidden_from_the_menu():
+    """A last-resort tool: not in the tap menu, and back-to-back runs refused."""
+    from livery_tracker.app import BOT_COMMANDS
+
+    assert all(cmd.command != "rebuild" for cmd in BOT_COMMANDS)
+
+    message = FakeMessage()
+    update = SimpleNamespace(message=message, effective_chat=SimpleNamespace(id=987654))
+    context = SimpleNamespace(
+        application=SimpleNamespace(create_task=lambda coro: coro.close())
+    )
+    asyncio.run(bot.cmd_rebuild(update, context))
+    asyncio.run(bot.cmd_rebuild(update, context))
+
+    assert "Rebuilding" in message.replies[0]
+    assert "Easy there" in message.replies[1], "the 10-minute cooldown must refuse"
+
+
 def test_dropflight_removes_only_the_requested_tail_and_flight(monkeypatch):
     message = FakeMessage()
     update = SimpleNamespace(message=message)
@@ -40,7 +58,7 @@ def test_dropflight_removes_only_the_requested_tail_and_flight(monkeypatch):
     )
     captured = {}
 
-    async def fake_purge(_app, predicate):
+    async def fake_purge(_app, predicate, trigger="purge"):
         captured["matches_target"] = predicate(
             FlightEvent(
                 "a", "N8619F", "", EventType.DEPARTURE, "OAK",

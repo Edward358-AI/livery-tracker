@@ -45,7 +45,15 @@ from . import schedule_provider
 from .adsb import Telemetry, fetch_telemetry, resolve_callsign_route
 from .config import Config
 from .digest import DigestManager, fmt_local
-from .flights import EventState, EventType, FlightEvent, FlightStore, append_history
+from .flights import (
+    EventState,
+    EventType,
+    FlightEvent,
+    FlightStore,
+    append_history,
+    rotate_journal,
+    set_journal_context,
+)
 from .geo import haversine_nm
 from .resolver import resolve_aircraft
 
@@ -100,6 +108,35 @@ WATCH_DEP_MAX_DIST_NM = 60.0
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _journal_evidence(
+    telemetry: Telemetry | None = None,
+    refresh: schedule_provider.LegRefresh | None = None,
+    **extra: object,
+) -> dict:
+    """The inputs a decision acted on, in journal-serializable form."""
+    evidence: dict[str, object] = dict(extra)
+    if telemetry is not None:
+        evidence["telemetry"] = {
+            "callsign": telemetry.callsign,
+            "alt_ft": telemetry.alt_ft,
+            "on_ground": telemetry.on_ground,
+            "gs_kts": telemetry.gs_kts,
+            "lat": telemetry.lat,
+            "lon": telemetry.lon,
+            "source": telemetry.source,
+        }
+    if refresh is not None:
+        evidence["refresh"] = {
+            "new_time": refresh.new_time.isoformat() if refresh.new_time else None,
+            "cancelled": refresh.cancelled,
+            "swapped": refresh.swapped,
+            "completed": refresh.completed,
+            "delay_minutes": refresh.delay_minutes,
+            "real_time": refresh.real_time.isoformat() if refresh.real_time else None,
+        }
+    return evidence
 
 
 def _digest(application: Application) -> DigestManager:
@@ -398,6 +435,7 @@ async def job_live_start(context: ContextTypes.DEFAULT_TYPE) -> None:
     schedule current, so this only gates on the store-local turnaround check."""
     application = context.application
     store: FlightStore = application.bot_data["store"]
+    set_journal_context("live_start")
     event = store.get(context.job.data)
     if event is None or event.status.terminal:
         return
@@ -422,6 +460,7 @@ async def job_poll(context: ContextTypes.DEFAULT_TYPE) -> None:
     application = context.application
     store: FlightStore = application.bot_data["store"]
     config: Config = application.bot_data["config"]
+    set_journal_context("poll")
     event = store.get(context.job.data)
     if event is None or event.status.terminal:
         context.job.schedule_removal()
@@ -441,6 +480,7 @@ async def job_poll(context: ContextTypes.DEFAULT_TYPE) -> None:
     )
     if conflicted:
         refresh = await asyncio.to_thread(schedule_provider.refresh_leg_time, event.tail, event)
+        set_journal_context("poll.hold", _journal_evidence(telemetry, refresh))
         if refresh.cancelled:
             event.status = EventState.CANCELLED
             event.status_note = ""
@@ -471,7 +511,13 @@ async def job_poll(context: ContextTypes.DEFAULT_TYPE) -> None:
             and _callsign_confirms_flight(telemetry.callsign, event.flight_number)
         )
         if airborne_as_ours or at_origin_as_ours:
+            set_journal_context(
+                "poll.hold.released", _journal_evidence(telemetry, refresh)
+            )
             event.status = EventState.LIVE  # fall through to normal detection
+            if event.status_note in (TURNAROUND_CONFLICT_NOTE,) or "awaiting" in event.status_note:
+                event.status_note = ""
+            store.upsert(event)
         else:
             if refresh.completed:
                 # The source recorded the flight as flown while we held the
@@ -529,6 +575,7 @@ async def job_poll(context: ContextTypes.DEFAULT_TYPE) -> None:
             refresh = await asyncio.to_thread(
                 schedule_provider.refresh_leg_time, event.tail, event
             )
+            set_journal_context("poll.no_show", _journal_evidence(refresh=refresh))
             action = _apply_delay_pushback(event, refresh)
             if action == "delayed":
                 store.upsert(event)
@@ -564,6 +611,10 @@ async def job_poll(context: ContextTypes.DEFAULT_TYPE) -> None:
         outcome = _conclude_dark_leg(event, now)
         if outcome is not None:
             state, note = outcome
+            set_journal_context(
+                "poll.dark_leg",
+                _journal_evidence(last_telemetry=dict(event.last_telemetry)),
+            )
             event.status, event.status_note = state, note
             store.upsert(event)
             append_history(event)
@@ -583,6 +634,7 @@ async def job_poll(context: ContextTypes.DEFAULT_TYPE) -> None:
         refresh = await asyncio.to_thread(
             schedule_provider.refresh_leg_time, event.tail, event
         )
+        set_journal_context("poll.callsign_mismatch", _journal_evidence(telemetry, refresh))
         if refresh.cancelled:
             event.status = EventState.CANCELLED
             event.status_note = ""
@@ -622,6 +674,7 @@ async def job_poll(context: ContextTypes.DEFAULT_TYPE) -> None:
         log.info("Holding %s: %s", event.id, event.status_note)
         return
 
+    set_journal_context("poll.detection", _journal_evidence(telemetry))
     dist_nm = None
     if airport.get("lat") is not None:
         dist_nm = haversine_nm(telemetry.lat, telemetry.lon, airport["lat"], airport["lon"])
@@ -892,6 +945,7 @@ def _reconcile_conclusion(
 async def job_verify_conclusion(context: ContextTypes.DEFAULT_TYPE) -> None:
     application = context.application
     store: FlightStore = application.bot_data["store"]
+    set_journal_context("verify")
     event = store.get(context.job.data)
     if event is None or event.status not in VERIFIABLE_STATES:
         return
@@ -906,6 +960,7 @@ async def job_verify_conclusion(context: ContextTypes.DEFAULT_TYPE) -> None:
     if action == "confirmed":
         log.info("Verification for %s: source agrees (%s)", event.id, event.status.value)
         return
+    set_journal_context(f"verify.{action}")
     store.upsert(event)
     if action == "revived":
         schedule_event_jobs(application, event)
@@ -1007,6 +1062,7 @@ async def harvest_single(
     Returns (new_legs, sources_ok); on source failure, watch mode is armed.
     """
     config: Config = application.bot_data["config"]
+    set_journal_context("harvest.add")
     livery = (config.watchlist.get(tail) or {}).get("livery", "")
     events, ok = await asyncio.to_thread(schedule_provider.harvest_tail, tail, livery, config)
     new_legs = _register_new_events(application, events)
@@ -1118,6 +1174,7 @@ async def rebuild_schedule(application: Application) -> HarvestResult:
 
     async with _harvest_lock:
         store: FlightStore = application.bot_data["store"]
+        set_journal_context("rebuild")
         removed = store.remove_where(lambda ev: ev.status not in OBSERVED_CONCLUSIONS)
         for event in removed:
             _cancel_jobs(application, event.id)
@@ -1157,6 +1214,7 @@ async def run_harvest(application: Application) -> HarvestResult:
 async def _run_harvest_locked(application: Application) -> HarvestResult:
     store: FlightStore = application.bot_data["store"]
     config: Config = application.bot_data["config"]
+    set_journal_context("harvest")
     result = HarvestResult()
     await heal_unknown_metadata(config)
 
@@ -1227,10 +1285,13 @@ async def _run_harvest_locked(application: Application) -> HarvestResult:
 
 
 async def purge_events(
-    application: Application, predicate: Callable[[FlightEvent], bool]
+    application: Application,
+    predicate: Callable[[FlightEvent], bool],
+    trigger: str = "purge",
 ) -> int:
     """Drop matching legs (e.g. after /remove or /rmairport) and refresh the digest."""
     store: FlightStore = application.bot_data["store"]
+    set_journal_context(trigger)
     removed = store.remove_where(predicate)
     for event in removed:
         _cancel_jobs(application, event.id)
@@ -1240,6 +1301,7 @@ async def purge_events(
 
 
 async def job_daily_harvest(context: ContextTypes.DEFAULT_TYPE) -> None:
+    await asyncio.to_thread(rotate_journal)
     await run_harvest(context.application)
 
 
@@ -1286,6 +1348,8 @@ async def _run_sync_locked(
 ) -> dict[str, int]:
     store: FlightStore = application.bot_data["store"]
     config: Config = application.bot_data["config"]
+    sync_tag = "hot_sync" if hot_only else "hourly_sync"
+    set_journal_context(sync_tag)
     now = _now()
     counts = {"tails": 0, "updated": 0, "withdrawn": 0, "cancelled": 0,
               "unverified": 0, "discovered": 0, "conflicts": 0}
@@ -1306,6 +1370,7 @@ async def _run_sync_locked(
         counts["tails"] += 1
         rows = await asyncio.to_thread(schedule_provider.fetch_flight_list, tail)
         if rows is None:
+            set_journal_context(f"{sync_tag}.unverified")
             for leg in legs:
                 counts["unverified"] += 1
                 if leg.status_note != UNVERIFIED_NOTE:
@@ -1324,6 +1389,9 @@ async def _run_sync_locked(
                 schedule_provider.refresh_leg_time, tail, leg
             )
             if refresh.cancelled:
+                set_journal_context(
+                    f"{sync_tag}.cancelled", _journal_evidence(refresh=refresh)
+                )
                 leg.status = EventState.CANCELLED
                 leg.status_note = ""
                 store.upsert(leg)
@@ -1337,6 +1405,9 @@ async def _run_sync_locked(
                     _has_turnaround_conflict, store, leg
                 ):
                     continue  # known-faulty source window: hold, don't withdraw
+                set_journal_context(
+                    f"{sync_tag}.withdrawn", _journal_evidence(refresh=refresh)
+                )
                 leg.status = EventState.SWAPPED
                 leg.status_note = (
                     "now flown by another aircraft" if refresh.swapped else WITHDRAWN_NOTE
@@ -1348,6 +1419,7 @@ async def _run_sync_locked(
                 changed = True
                 continue
             # Present and running: mirror the source's time and delay figure.
+            set_journal_context(f"{sync_tag}.adopt", _journal_evidence(refresh=refresh))
             old_time, old_note = leg.scheduled_time, leg.status_note
             if leg.status_note == UNVERIFIED_NOTE:
                 leg.status_note = ""
@@ -1364,6 +1436,7 @@ async def _run_sync_locked(
         # Free discovery: the rows are already here, so register any legs the
         # boards/daily harvest have not seen yet (or whose time moved so far
         # the reconciler withdrew the old copy).
+        set_journal_context(f"{sync_tag}.discovered")
         livery = (config.watchlist.get(tail) or {}).get("livery", "")
         events = schedule_provider.rows_to_events(tail, livery, rows, config, now=now)
         created = _register_new_events(application, events)
@@ -1389,6 +1462,9 @@ async def _run_sync_locked(
                 _position_conflict_note, due, telemetry, airport
             )
             if note:
+                set_journal_context(
+                    f"{sync_tag}.position_conflict", _journal_evidence(telemetry)
+                )
                 due.status = EventState.TURNAROUND_DELAY
                 due.status_note = note
                 store.upsert(due)
@@ -1539,6 +1615,7 @@ async def job_adsb_watch(context: ContextTypes.DEFAULT_TYPE) -> None:
     application = context.application
     store: FlightStore = application.bot_data["store"]
     config: Config = application.bot_data["config"]
+    set_journal_context("watch")
     now = _now()
     created = 0
 
@@ -1576,6 +1653,7 @@ async def job_adsb_watch(context: ContextTypes.DEFAULT_TYPE) -> None:
 def rehydrate(application: Application) -> None:
     """After a restart, resume every non-terminal leg from flights_today.json."""
     store: FlightStore = application.bot_data["store"]
+    set_journal_context("startup")
     _dedupe_store(application)
     active = store.active()
     for event in active:

@@ -3,7 +3,7 @@
 Get a live Telegram message whenever one of your favorite special-livery aircraft is scheduled
 to arrive at or depart from *your* airports — with live ADS-B tracking as it happens.
 
-**100% free.** No FlightAware AeroAPI subscription, no paid keys. Schedules come from
+**100% free.** No paid flight-data APIs, no keys. Schedules come from
 public flight-tracking pages, aircraft/livery metadata from the Planespotters, and live positions come from the community ADS-B networks
 ([adsb.fi](https://adsb.fi) / [adsb.lol](https://adsb.lol)), and airport coordinates
 from [OurAirports](https://ourairports.com).
@@ -89,7 +89,7 @@ environment, so nothing touches your system Python:
 | `python-telegram-bot[job-queue]` | Bot commands, message edits, and all scheduling |
 | `curl_cffi` | Chrome-impersonating requests for schedule harvesting |
 | `httpx` | Plain HTTP for the ADS-B and airport APIs |
-| `beautifulsoup4` | HTML parsing for the FlightAware fallback |
+| `beautifulsoup4` | HTML parsing for a fallback schedule source |
 | `python-dotenv` | Reading your `.env` credentials |
 
 ## Quick start — one line, no git, no Docker
@@ -191,11 +191,56 @@ On first run you'll be asked for:
 | `/rmairport <code>` | Remove a target airport (its legs drop out of the digest) |
 | `/airports` | List target airports |
 | `/refresh` | Re-run today's schedule harvest right now |
-| `/rebuild` | Re-derive today's schedule from the sources. Keeps your watchlist, airports, aircraft details **and every landing/departure/diversion the tracker directly observed** — a rebuild rebuilds the future, it doesn't rewrite the past (a wrong observed record is `/dropflight`'s job) |
+| `/rebuild` | Last-resort recovery: re-derive today's schedule from the sources. Keeps your watchlist, airports, aircraft details **and every landing/departure/diversion the tracker directly observed** — a rebuild rebuilds the future, it doesn't rewrite the past (a wrong observed record is `/dropflight`'s job). Like `/dropflight`, deliberately not in the tap menu — type it. 10-min cooldown |
 | `/status` | Watchlist size, airports, digest layout, active flight legs |
 | `/view` | Show the digest layout; `/view type\|airport\|airline` changes it |
 | `/version` | Running version + whether a newer release exists |
 | `/update` | Install the latest release now and restart |
+
+### The three refresh tiers — `/refresh` vs `/rebuild` vs the daily harvest
+
+| | What it does | What survives | When |
+|---|---|---|---|
+| **`/refresh`** | Re-runs the two-phase harvest (airport boards first, then per-tail) to find new legs and update drifted times | **Everything** — existing legs, live tracking, holds and conclusions are untouched; purely additive | On demand (2-min cooldown; skipped if a harvest is already running) |
+| **Daily harvest** | Exactly `/refresh` plus the day-boundary chores: purge legs ≥12 h past their time, collapse duplicates, rotate the journal, delete yesterday's digest message and start today's | Everything from today | Automatic, 06:00 local (configurable via `HARVEST_TIME`) |
+| **`/rebuild`** | The distrust button: throws away all schedule state and the schedule caches, then re-derives the whole day from the sources | Only what the tracker *witnessed* (landed / departed / diverted legs) plus your watchlist, airports, aircraft dossiers, history and journal | Last resort, typed only (not in the tap menu); 10-min cooldown |
+
+**What each config change triggers:**
+
+- `/add <tail>` — a targeted harvest of just that tail; its legs appear within seconds.
+- `/addairport <code>` — a **full re-harvest**, because a new airport changes what every
+  watched tail's schedule means (legs previously filtered out now match).
+- `/rmairport <code>` — no harvest: every leg targeting that airport is purged
+  immediately and the digest redrawn; the watchlist is untouched.
+- `/remove <tail>` — mirror image: the tail's legs purge; airports untouched.
+- `/dropflight <tail> <flight>` — the scalpel: one flight's legs removed, everything
+  else intact.
+
+All of these leave an audit trail in the journal (`command.remove`,
+`command.rmairport`, …).
+
+### The automatic background machinery
+
+Everything below runs on its own — the manual commands above are only for
+telling the tracker about your fleet or overriding it when a source got
+something wrong.
+
+| Cadence | Job | What it does |
+|---|---|---|
+| 06:00 daily | **Harvest** | Builds the new day: purges yesterday, sweeps your airports' boards, then every watched tail |
+| Hourly | **Mirror sync** | Reconciles every pending leg with the source: adopts times/delays verbatim, applies cancellations, withdraws legs no longer listed; a failed fetch marks legs *unverified*, never drops them |
+| Every 15 min | **Hot sync** | The same reconciliation, but only for tails with a leg due within 2 h — so a late cancellation or swap can't hide in the hourly gap |
+| Every 3 h | **Board discovery** | A cheap boards-only sweep that catches newly scheduled legs between harvests |
+| T-1h per leg | **Live start** | Hands the leg to ADS-B (after a physics check that the source's ETD is even possible) |
+| Every 2 min per live leg | **Poll** | Live position, landing/departure/diversion detection, delay annotations, callsign and position sanity checks — anomalies trigger extra source re-reads automatically |
+| ~25 min after each conclusion | **Verification** | Cross-checks the verdict against the source: direct observations stand, weak inferences defer |
+| Every 15 min *(outages only)* | **ADS-B watch** | If every schedule source fails, legs are synthesized from live traffic until the sources recover |
+| 04:00 daily | **Update check** | Installs a newer published release if one exists and restarts |
+
+The guiding rule for request budget: **attention follows anomaly**. Quietly
+pending legs cost one read an hour; a leg that looks wrong (dark past its
+time, wrong callsign, impossible ETD) is automatically re-checked against the
+source every few minutes until it looks right again.
 
 ## Looking up an aircraft — `/info`
 
@@ -310,10 +355,27 @@ a real departure at one end and a real arrival at the other.
 
 ### Notes you may see on a leg
 
+- `delayed 47m` — the sync mirrored the source's own delay figure (it clears
+  again if the airline recovers).
+- `~10:51 AM (per source)` — the outcome was adopted from the source's record
+  rather than watched live (e.g. the aircraft was already wearing its next
+  callsign, or out of receiver coverage). The `~` always marks an adopted time.
 - `(signal lost on approach)` / `(signal lost after takeoff)` — the aircraft went
   dark near the ground (common — receiver coverage thins at low altitude) and the
   outcome was inferred from its last known position and vertical rate.
-- `delayed 47m` — the schedule re-check found the flight running late.
+- `aircraft still operating SWA3982 — awaiting rotation` — the tail is visibly on
+  (or fresh off) an earlier flight of its own rotation; the leg is held until the
+  expected flight is seen, never swapped off on callsign evidence alone.
+- `aircraft seen on the ground near DFW — awaiting schedule update` — the
+  transponder places the aircraft somewhere that makes this departure impossible;
+  held until the schedule catches up.
+- `no ADS-B contact 47m past ETD — likely delayed` / `32m past ETD — still on the
+  ground` / `running 25m late — 180 NM out` — obvious-delay annotations from live
+  position (or the lack of one) while the source still says on time.
+- `unverified — source unreachable` — the last sync could not reach the source;
+  the leg is kept, flagged, and re-verified next pass.
+- `(confirmed by source)` / `(source disagrees)` — what the ~25-minute
+  post-conclusion cross-check found.
 - `found via ADS-B watch` — the leg was discovered from live traffic during a
   schedule-source outage, not from a schedule.
 
@@ -327,6 +389,7 @@ a real departure at one end and a real arrival at the other.
 | `schedule_cache.json` | Cached schedule per tail (12h outage buffer) |
 | `aircraft_cache.json` | Accumulated aircraft facts for `/info` (type, hex, build year) |
 | `history.jsonl` | Every concluded leg with final telemetry — audit/tuning log |
+| `journal.jsonl` | Every state transition with its cause and evidence — the debugging log (rotated daily to `journal-YYYYMMDD.jsonl`, 7 days kept) |
 | `airports.csv` | Cached OurAirports database (~9 MB, refreshed every 90 days) |
 
 ## Configuration knobs (`.env`)
@@ -405,6 +468,14 @@ a real departure at one end and a real arrival at the other.
   is actually observed near that airport; destinations self-verify via live tracking.
 - Every concluded leg is appended to `data/history.jsonl` with its final telemetry,
   so you can audit the inference decisions against reality and tune thresholds.
+- **The flight journal**: every state transition, schedule change, creation and
+  removal of a leg is appended to `data/journal.jsonl` — with the code path that
+  caused it (`poll.callsign_mismatch`, `hourly_sync.withdrawn`, `verify.corrected`,
+  …) and the evidence it acted on (the telemetry seen, the source's answer). When
+  a digest line looks wrong hours later, `grep <tail> data/journal*.jsonl` shows
+  the exact decision and what the sources were saying at that moment. Routine
+  2-minute telemetry updates are not journaled — only real changes — and the file
+  rotates daily, keeping a week of archives.
 
 ## License
 

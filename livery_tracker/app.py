@@ -28,7 +28,8 @@ BOT_COMMANDS = [
     BotCommand("status", "Tracker status"),
     BotCommand("view", "Change how the digest is grouped"),
     BotCommand("refresh", "Run schedule harvest now"),
-    BotCommand("rebuild", "Clear cached schedules and re-harvest"),
+    # /rebuild and /dropflight stay out of the tap menu on purpose: they are
+    # recovery tools, documented in /help, and work when typed.
     BotCommand("version", "Version + update check"),
     BotCommand("update", "Install the latest release"),
     BotCommand("help", "Show help"),

@@ -26,6 +26,9 @@ COOLDOWNS = {
     "info": Cooldown(seconds=10),
     "add": Cooldown(seconds=10),
     "refresh": Cooldown(seconds=120),
+    # The heaviest command in the system (full harvest + cache clearing) and
+    # a last-resort tool — back-to-back rebuilds are never legitimate.
+    "rebuild": Cooldown(seconds=600),
 }
 
 
@@ -65,7 +68,8 @@ HELP_TEXT = """<b>✈️ Livery Tracker Commands</b>
 
 <b>Tracking</b>
 /refresh — re-run today's schedule harvest now
-/rebuild — re-derive today's schedule (observed landings/departures are kept)
+/rebuild — last resort: re-derive today's schedule from the sources
+(observed landings/departures are kept; deliberately not in the command menu)
 /status — tracker status
 /version — running version + update check
 /update — install the latest release now
@@ -303,7 +307,9 @@ async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await _reply_parts(update.message, f"{tail} is not on the watchlist.")
         return
     config.save()
-    dropped = await tracker.purge_events(context.application, lambda ev: ev.tail == tail)
+    dropped = await tracker.purge_events(
+        context.application, lambda ev: ev.tail == tail, trigger="command.remove"
+    )
     note = f" ({dropped} pending leg(s) dropped from today's digest)" if dropped else ""
     await _reply_parts(update.message, f"🗑 Removed {tail} from the watchlist.{note}")
 
@@ -322,6 +328,7 @@ async def cmd_dropflight(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     dropped = await tracker.purge_events(
         context.application,
         lambda ev: ev.tail == tail and ev.flight_number.upper() == flight_number,
+        trigger="command.dropflight",
     )
     if dropped:
         await _reply_parts(
@@ -402,7 +409,8 @@ async def cmd_rmairport(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     config.target_airports.pop(key)
     config.save()
     dropped = await tracker.purge_events(
-        context.application, lambda ev: ev.target_airport == key
+        context.application, lambda ev: ev.target_airport == key,
+        trigger="command.rmairport",
     )
     note = f" ({dropped} pending leg(s) dropped from today's digest)" if dropped else ""
     await _reply_parts(update.message, f"🗑 Removed {key} from target airports.{note}")
@@ -532,15 +540,18 @@ async def _background_rebuild(application, chat_id: int) -> None:
 
 
 async def cmd_rebuild(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Discard today's legs and cached schedules, then re-harvest from scratch."""
+    """Re-derive today's schedule from the sources (last-resort recovery)."""
     if tracker.harvest_in_progress():
         await update.message.reply_text(
             "⏳ A harvest is already running — try again once it finishes."
         )
         return
+    if await _rate_limited(update, "rebuild"):
+        return
     await update.message.reply_text(
-        "♻️ Rebuilding: clearing today's legs and cached schedules, then "
-        "re-harvesting.\nYour watchlist, airports and aircraft details are kept.\n"
+        "♻️ Rebuilding: clearing today's pending legs and cached schedules, "
+        "then re-harvesting.\nYour watchlist, airports, aircraft details and "
+        "observed landings/departures are kept.\n"
         "This takes a couple of minutes — the digest updates as it goes."
     )
     context.application.create_task(
