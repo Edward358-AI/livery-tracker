@@ -169,20 +169,94 @@ def test_next_healthy_sync_clears_the_unverified_note(monkeypatch):
     assert store.get("arr").status_note == ""
 
 
-# -- live legs belong to ADS-B -------------------------------------------------
+# -- live legs belong to ADS-B... once ADS-B has actually seen them -------------
 
-def test_sync_never_touches_live_legs(monkeypatch):
+def test_sync_never_touches_a_live_leg_with_telemetry(monkeypatch):
     leg = pending_leg(status=EventState.LIVE)
+    leg.last_telemetry = {"lat": 37.0, "lon": -122.0, "alt": 12000}
     app, store = app_with(leg)
 
     def boom(query, fetch_by="reg"):
-        raise AssertionError("sync must not fetch for a tail with only live legs")
+        raise AssertionError("sync must not fetch for a tail with only seen live legs")
 
     monkeypatch.setattr(tracker.schedule_provider, "fetch_flight_list", boom)
     counts = asyncio.run(tracker.run_schedule_sync(app))
 
     assert counts["tails"] == 0
     assert store.get("arr").status == EventState.LIVE
+
+
+def test_sync_mirrors_a_late_delay_onto_a_dark_live_leg(monkeypatch):
+    """The N24988 case: a big delay published after T-1h, while the aircraft
+    sits dark at its gate. The mirror keeps custody until first contact."""
+    leg = pending_leg(
+        type=EventType.DEPARTURE, status=EventState.LIVE,
+        scheduled_time=NOW + timedelta(minutes=30),
+        route_origin="SFO", route_destination="ICN",
+    )
+    app, store = app_with(leg)
+    new_time = NOW + timedelta(hours=4)
+
+    run_sync(app, monkeypatch, rows=[],
+             refresh=lambda reg, ev: LegRefresh(new_time, delay_minutes=240))
+
+    survivor = store.get("arr")
+    assert survivor.scheduled_time == new_time
+    assert survivor.status == EventState.WAITING_LIVE, \
+        "pushed out of its live window: back to the mirror until T-1h again"
+    assert "delayed 240m" in survivor.status_note
+
+
+def test_sync_keeps_a_dark_live_leg_live_for_a_small_delay(monkeypatch):
+    leg = pending_leg(
+        type=EventType.DEPARTURE, status=EventState.LIVE,
+        scheduled_time=NOW + timedelta(minutes=10),
+        route_origin="SFO", route_destination="SEA",
+    )
+    app, store = app_with(leg)
+    new_time = NOW + timedelta(minutes=40)  # still inside the T-1h window
+
+    run_sync(app, monkeypatch, rows=[],
+             refresh=lambda reg, ev: LegRefresh(new_time, delay_minutes=30))
+
+    survivor = store.get("arr")
+    assert survivor.status == EventState.LIVE, "still due soon — keep polling"
+    assert survivor.scheduled_time == new_time
+
+
+def test_sync_concludes_a_dark_live_leg_the_source_records_as_flown(monkeypatch):
+    leg = pending_leg(
+        type=EventType.DEPARTURE, status=EventState.LIVE,
+        scheduled_time=NOW - timedelta(minutes=20),
+        route_origin="SFO", route_destination="SEA",
+    )
+    app, store = app_with(leg)
+
+    run_sync(app, monkeypatch, rows=[],
+             refresh=lambda reg, ev: LegRefresh(
+                 ev.scheduled_time, completed=True,
+                 real_time=NOW - timedelta(minutes=5),
+             ))
+
+    survivor = store.get("arr")
+    assert survivor.status == EventState.DEPARTED
+    assert "per source" in survivor.status_note
+
+
+def test_sync_does_not_withdraw_a_dark_live_leg_at_departure_time(monkeypatch):
+    """Sources briefly unlist flights around pushback; absence only counts
+    once the leg is well overdue."""
+    leg = pending_leg(
+        type=EventType.DEPARTURE, status=EventState.LIVE,
+        scheduled_time=NOW - timedelta(minutes=10),
+        route_origin="SFO", route_destination="SEA",
+    )
+    app, store = app_with(leg)
+
+    run_sync(app, monkeypatch, rows=[],
+             refresh=lambda reg, ev: LegRefresh(None, swapped=True))
+
+    assert store.get("arr").status == EventState.LIVE, "10 minutes late proves nothing"
 
 
 # -- free discovery from the same rows ----------------------------------------

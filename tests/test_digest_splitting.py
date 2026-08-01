@@ -172,3 +172,24 @@ def test_legacy_single_id_state_is_understood():
 
     assert bot.edited and bot.edited[0][0] == 42   # edited, not re-sent
     assert bot.sent == []
+
+
+def test_live_leg_without_contact_still_shows_its_scheduled_time():
+    """A dark live leg must show its ETD/ETA — a bare "live tracking active"
+    hid the one thing the reader wanted (the N24988 gate-delay case)."""
+    from datetime import datetime, timedelta, timezone
+
+    from livery_tracker.digest import format_leg
+    from livery_tracker.flights import EventState, EventType, FlightEvent
+
+    ev = FlightEvent(
+        id="x", tail="N24988", livery="The Future Is SAF",
+        type=EventType.DEPARTURE, target_airport="SFO",
+        scheduled_time=datetime.now(timezone.utc) + timedelta(minutes=30),
+        route_origin="SFO", route_destination="ICN", flight_number="UA893",
+        status=EventState.LIVE, status_note="delayed 240m",
+    )
+    line = format_leg(ev)
+    assert "ETD" in line
+    assert "live tracking active" in line
+    assert "delayed 240m" in line

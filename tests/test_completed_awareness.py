@@ -182,6 +182,56 @@ def test_never_seen_leg_adopts_the_sources_record_instead_of_lost(monkeypatch):
     assert "per source" in survivor.status_note
 
 
+# -- the early no-show source check (ETD+10m, not +30m) -------------------------
+
+def test_dark_leg_mirrors_a_delay_soon_after_its_time(monkeypatch):
+    """A leg 15 minutes overdue with no ADS-B contact asks the source right
+    away — a late-published delay reaches the digest within minutes."""
+    store, config = FlightStore(), sfo_config()
+    leg = make_leg(
+        EventType.DEPARTURE, EventState.LIVE,
+        when=NOW - timedelta(minutes=15), number="UA893",
+    )
+    store.upsert(leg)
+    app = FakeApp(store, config)
+    new_time = NOW + timedelta(hours=3)
+    monkeypatch.setattr(
+        tracker.schedule_provider, "refresh_leg_time",
+        lambda reg, event: LegRefresh(new_time, delay_minutes=195),
+    )
+    monkeypatch.setattr(tracker, "fetch_telemetry", lambda reg: None)
+
+    asyncio.run(tracker.job_poll(context_for(app, leg)))
+
+    survivor = store.get(leg.id)
+    assert survivor.status == EventState.WAITING_LIVE
+    assert survivor.scheduled_time == new_time
+    assert "delayed" in survivor.status_note
+
+
+def test_dark_leg_absence_is_ignored_before_the_older_deadline(monkeypatch):
+    """Sources briefly unlist flights around pushback: a swapped/absent answer
+    at 15 minutes late must annotate, not withdraw."""
+    store, config = FlightStore(), sfo_config()
+    leg = make_leg(
+        EventType.DEPARTURE, EventState.LIVE,
+        when=NOW - timedelta(minutes=15), number="UA893",
+    )
+    store.upsert(leg)
+    app = FakeApp(store, config)
+    monkeypatch.setattr(
+        tracker.schedule_provider, "refresh_leg_time",
+        lambda reg, event: LegRefresh(None, swapped=True),
+    )
+    monkeypatch.setattr(tracker, "fetch_telemetry", lambda reg: None)
+
+    asyncio.run(tracker.job_poll(context_for(app, leg)))
+
+    survivor = store.get(leg.id)
+    assert survivor.status == EventState.LIVE, "15 minutes late proves nothing"
+    assert "likely delayed" in survivor.status_note
+
+
 # -- rebuild keeps the observed past, re-derives the rest -----------------------
 
 def test_rebuild_keeps_observed_conclusions_and_clears_derived_ones(monkeypatch):

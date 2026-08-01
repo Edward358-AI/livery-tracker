@@ -568,10 +568,13 @@ async def job_poll(context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if telemetry is None:
         never_seen = event.last_telemetry.get("lat") is None
-        if never_seen and now > event.scheduled_time + LOST_TIMEOUT:
-            # Dark past the deadline. Ask the source; if it offers no
-            # explanation, we still don't invent one — annotate "likely
-            # delayed" and keep polling until the hard cap.
+        if never_seen and now > event.scheduled_time + NO_SHOW_GRACE:
+            # Dark past its time. Ask the source right away — a delayed
+            # estimate gets mirrored within minutes instead of leaving a
+            # bare "live tracking active" line. But absence of the leg from
+            # the source only counts once the older deadline has passed,
+            # and we never invent an outcome: no explanation just means
+            # "likely delayed" until the hard cap.
             refresh = await asyncio.to_thread(
                 schedule_provider.refresh_leg_time, event.tail, event
             )
@@ -588,7 +591,7 @@ async def job_poll(context: ContextTypes.DEFAULT_TYPE) -> None:
                 event.status, event.status_note = EventState.CANCELLED, ""
             elif action == "completed":
                 _conclude_from_source(event, refresh)
-            elif action == "swapped":
+            elif action == "swapped" and now > event.scheduled_time + LOST_TIMEOUT:
                 event.status, event.status_note = EventState.SWAPPED, WITHDRAWN_NOTE
             elif now > event.scheduled_time + LIVE_MAX_OVERRUN:
                 event.status, event.status_note = EventState.LOST, ""
@@ -1319,6 +1322,21 @@ SYNC_STATES = (
 )
 
 
+def _never_seen_live(event: FlightEvent) -> bool:
+    """A leg that went live but ADS-B has never actually seen.
+
+    Live in name only — the aircraft is dark at a gate somewhere, so there
+    is nothing for the live layer to own yet. Until the first position
+    arrives, the mirror keeps custody: a delay published after T-1h must
+    still reach the digest.
+    """
+    return event.status == EventState.LIVE and event.last_telemetry.get("lat") is None
+
+
+def _syncable(event: FlightEvent) -> bool:
+    return event.status in SYNC_STATES or _never_seen_live(event)
+
+
 async def job_hourly_sync(context: ContextTypes.DEFAULT_TYPE) -> None:
     await run_schedule_sync(context.application)
 
@@ -1357,7 +1375,7 @@ async def _run_sync_locked(
 
     pending_by_tail: dict[str, list[FlightEvent]] = {}
     for ev in store.events.values():
-        if ev.status in SYNC_STATES:
+        if _syncable(ev):
             pending_by_tail.setdefault(ev.tail, []).append(ev)
     if hot_only:
         horizon = now + HOT_WINDOW
@@ -1381,7 +1399,7 @@ async def _run_sync_locked(
         schedule_provider.cache_rows(tail, rows)
 
         for leg in legs:
-            if leg.status not in SYNC_STATES:
+            if not _syncable(leg):
                 continue  # state moved while we were fetching
             # refresh_leg_time re-reads the same memoised rows, so per-leg
             # reconciliation costs no extra requests beyond the tail fetch.
@@ -1405,6 +1423,8 @@ async def _run_sync_locked(
                     _has_turnaround_conflict, store, leg
                 ):
                     continue  # known-faulty source window: hold, don't withdraw
+                if _never_seen_live(leg) and now <= leg.scheduled_time + LOST_TIMEOUT:
+                    continue  # absence right at departure time proves nothing yet
                 set_journal_context(
                     f"{sync_tag}.withdrawn", _journal_evidence(refresh=refresh)
                 )
@@ -1418,12 +1438,31 @@ async def _run_sync_locked(
                 counts["withdrawn"] += 1
                 changed = True
                 continue
+            if _never_seen_live(leg) and refresh.completed:
+                # Flew entirely inside a coverage gap; the source knows.
+                set_journal_context(
+                    f"{sync_tag}.completed", _journal_evidence(refresh=refresh)
+                )
+                _conclude_from_source(leg, refresh)
+                store.upsert(leg)
+                append_history(leg)
+                _cancel_jobs(application, leg.id)
+                counts["updated"] += 1
+                changed = True
+                continue
             # Present and running: mirror the source's time and delay figure.
             set_journal_context(f"{sync_tag}.adopt", _journal_evidence(refresh=refresh))
             old_time, old_note = leg.scheduled_time, leg.status_note
             if leg.status_note == UNVERIFIED_NOTE:
                 leg.status_note = ""
             _apply_schedule(leg, refresh)
+            if (
+                _never_seen_live(leg)
+                and leg.scheduled_time - now > LIVE_LEAD
+            ):
+                # The delay pushed the leg back out of its live window: hand
+                # it back to the mirror until T-1h comes around again.
+                leg.status = EventState.WAITING_LIVE
             if leg.scheduled_time != old_time or leg.status_note != old_note:
                 store.upsert(leg)
                 if leg.scheduled_time != old_time and leg.status in (

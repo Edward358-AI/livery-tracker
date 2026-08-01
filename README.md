@@ -430,7 +430,10 @@ a real departure at one end and a real arrival at the other.
   an hour and reconciled with the source — times and delay figures are adopted
   verbatim, cancellations become ❌, and a leg the source no longer lists is
   withdrawn (🔀). A failed fetch marks legs *unverified* instead of dropping them.
-  Legs already being tracked live belong to ADS-B and are never touched by the sync.
+  Legs being tracked live belong to ADS-B and are never touched by the sync — but
+  only once ADS-B has actually seen them: a leg that went live while the aircraft
+  sits dark at a gate stays in the mirror's custody, so a delay published after
+  T-1h still reaches the digest (and a big one hands the leg back to waiting).
   On top of the hourly floor, a **15-minute hot pass** covers just the tails with a
   leg due within 2 hours, so a late cancellation or swap can't hide in the gap.
 - **Completed-awareness**: whenever the tracker consults the source about a leg it
