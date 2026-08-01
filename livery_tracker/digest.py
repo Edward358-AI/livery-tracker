@@ -61,9 +61,12 @@ def _leg_detail(event: FlightEvent) -> str:
             bits.append(f"{tele['dist_nm']:.0f} NM {'out' if event.type == EventType.ARRIVAL else 'away'}")
         if bits:
             return " · ".join(bits)
-        # No ADS-B contact yet: the scheduled time is still the most useful
-        # thing to show (a bare "live tracking active" told the reader nothing).
-        detail = f"{when_label} {fmt_local(event.scheduled_time)} — live tracking active"
+        # Nothing received yet: show the scheduled time and say plainly why
+        # there are no figures, rather than an opaque "live tracking active".
+        detail = (
+            f"{when_label} {fmt_local(event.scheduled_time)} — polling, "
+            "no ADS-B contact yet"
+        )
         if event.status_note:
             detail += f" ({event.status_note})"
         return detail

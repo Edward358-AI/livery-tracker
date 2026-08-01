@@ -571,7 +571,7 @@ async def job_poll(context: ContextTypes.DEFAULT_TYPE) -> None:
         if never_seen and now > event.scheduled_time + NO_SHOW_GRACE:
             # Dark past its time. Ask the source right away — a delayed
             # estimate gets mirrored within minutes instead of leaving a
-            # bare "live tracking active" line. But absence of the leg from
+            # bare "no ADS-B contact yet" line. But absence of the leg from
             # the source only counts once the older deadline has passed,
             # and we never invent an outcome: no explanation just means
             # "likely delayed" until the hard cap.

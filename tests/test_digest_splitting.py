@@ -175,8 +175,9 @@ def test_legacy_single_id_state_is_understood():
 
 
 def test_live_leg_without_contact_still_shows_its_scheduled_time():
-    """A dark live leg must show its ETD/ETA — a bare "live tracking active"
-    hid the one thing the reader wanted (the N24988 gate-delay case)."""
+    """A dark live leg must show its ETD/ETA and say why it has no figures —
+    a bare "live tracking active" hid the one thing the reader wanted (the
+    N24988 gate-delay case)."""
     from datetime import datetime, timedelta, timezone
 
     from livery_tracker.digest import format_leg
@@ -191,5 +192,5 @@ def test_live_leg_without_contact_still_shows_its_scheduled_time():
     )
     line = format_leg(ev)
     assert "ETD" in line
-    assert "live tracking active" in line
+    assert "no ADS-B contact yet" in line
     assert "delayed 240m" in line

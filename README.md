@@ -357,6 +357,10 @@ a real departure at one end and a real arrival at the other.
 
 - `delayed 47m` — the sync mirrored the source's own delay figure (it clears
   again if the airline recovers).
+- `ETD 10:40 AM PDT — polling, no ADS-B contact yet` — the leg is inside its
+  live window and being polled every 2 minutes, but the aircraft's transponder
+  hasn't been picked up (usually parked at a gate). The scheduled time keeps
+  updating from the source until the first position arrives.
 - `~10:51 AM (per source)` — the outcome was adopted from the source's record
   rather than watched live (e.g. the aircraft was already wearing its next
   callsign, or out of receiver coverage). The `~` always marks an adopted time.
