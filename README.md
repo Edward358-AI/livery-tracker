@@ -290,10 +290,10 @@ watch. Example:
 Watching 5 aircraft at OAK, SFO, SJC
 
 🔁 Between your airports
-🚨 N265AK "West Coast Wonders" — SFO➔LAX AS1052, departed 9:04 AM PDT → 21,000 ft · 415 kts · 62 NM out
+🚨 N265AK "West Coast Wonders" — SFO➔LAX AS1052, departed 9:04 AM PDT → ETA 10:31 AM PDT — 21,000 ft · 415 kts · 62 NM out
 
 🛬 Arrivals
-🚨 N8658A — DEN➔SFO WN4670 @ SFO, 5,025 ft · 235 kts · 17 NM out
+🚨 N8658A — DEN➔SFO WN4670 @ SFO, ETA 1:02 PM PDT — 5,025 ft · 235 kts · 17 NM out
 🟡 N8658A — LAS➔SJC WN1242 @ SJC, ETA 1:45 PM PDT
 
 🛫 Departures
@@ -308,7 +308,7 @@ Updated 7:57 PM PDT
 |---|---|---|
 | 🟡 / 🕒 | Scheduled | Pending; mirrored against the source every hour (shows `delayed Xm` from the source's own figures) |
 | ⚠️ | Awaiting turnaround / conflict | The source's ETD is physically impossible (inbound landed later, or the aircraft is visibly at another airport); held without guessing a new time |
-| 🚨 | Live | Polling ADS-B every 2 min from T-1h — shows altitude · speed · distance |
+| 🚨 | Live | Polling ADS-B every 2 min from T-1h — shows the expected time, then altitude · speed · distance |
 | ✅ | Landed | Touched down at your airport (or concluded from signal loss on approach) |
 | 🛫 | Departed | Climbed through 10,000 ft or left 15 NM (or concluded after going dark airborne) |
 | ↪️ | Diverted | Confirmed on the ground 30+ NM away — names the nearest airport |
@@ -341,7 +341,7 @@ a real departure at one end and a real arrival at the other.
 🛬🛫 SFO — San Francisco
 ✅ N8658A — DEN➔SFO WN4670, landed 8:03 PM PDT
 🟡 N642FR "Hugh the Manatee" — SFO➔SJC F9100, ETD 11:43 PM PDT
-🚨 N265AK "Xáat Kwáani" — SEA➔SFO AS1234, 12,400 ft · 310 kts · 48 NM out
+🚨 N265AK "Xáat Kwáani" — SEA➔SFO AS1234, ETA 12:58 PM PDT — 12,400 ft · 310 kts · 48 NM out
 ```
 
 **`/view airline`** — one section per airline (resolved automatically when you
@@ -349,7 +349,7 @@ a real departure at one end and a real arrival at the other.
 
 ```
 🏢 Alaska Airlines
-🚨 N265AK "Xáat Kwáani" — SEA➔SFO AS1234 @ SFO, 12,400 ft · 310 kts · 48 NM out
+🚨 N265AK "Xáat Kwáani" — SEA➔SFO AS1234 @ SFO, ETA 12:58 PM PDT — 12,400 ft · 310 kts · 48 NM out
 🟡 N596AS "Tiana's Bayou Adventure" — SJC➔SEA AS1311 @ SJC, ETD Mon 1:03 AM PDT
 ```
 
@@ -360,7 +360,9 @@ a real departure at one end and a real arrival at the other.
 - `ETD 10:40 AM PDT — polling, no ADS-B contact yet` — the leg is inside its
   live window and being polled every 2 minutes, but the aircraft's transponder
   hasn't been picked up (usually parked at a gate). The scheduled time keeps
-  updating from the source until the first position arrives.
+  updating from the source until the first position arrives. Once it does, the
+  same line carries the live figures after the time: `ETA 1:02 PM PDT — 5,025 ft
+  · 235 kts · 17 NM out`.
 - `~10:51 AM (per source)` — the outcome was adopted from the source's record
   rather than watched live (e.g. the aircraft was already wearing its next
   callsign, or out of receiver coverage). The `~` always marks an adopted time.
@@ -373,9 +375,9 @@ a real departure at one end and a real arrival at the other.
 - `aircraft seen on the ground near DFW — awaiting schedule update` — the
   transponder places the aircraft somewhere that makes this departure impossible;
   held until the schedule catches up.
-- `no ADS-B contact 47m past ETD — likely delayed` / `32m past ETD — still on the
-  ground` / `running 25m late — 180 NM out` — obvious-delay annotations from live
-  position (or the lack of one) while the source still says on time.
+- `no ADS-B contact 47m past ETD — likely delayed` / `running 25m late` / `running
+  32m late — still on the ground` — obvious-delay annotations from live position
+  (or the lack of one) while the source still says on time.
 - `unverified — source unreachable` — the last sync could not reach the source;
   the leg is kept, flagged, and re-verified next pass.
 - `(confirmed by source)` / `(source disagrees)` — what the ~25-minute

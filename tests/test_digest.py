@@ -76,6 +76,9 @@ def test_render_sections_and_states():
     assert "🛫 <b>Departures</b>" in text
     assert "🟡 <b>N265AK</b>" in text                       # scheduled arrival
     assert "12,400 ft · 310 kts · 48 NM out" in text        # live telemetry line
+    # A live leg keeps its expected time: distance alone never says whether
+    # the aircraft is early, late or on time.
+    assert "ETA" in text.split("12,400 ft")[0].splitlines()[-1]
     assert "✅ <b>N711HK</b> — SEA➔SFO AS1234 @ SFO, landed 4:06 PM PDT" in text
     assert "SFO➔RDU" in text                                # departure leg present
     assert "Updated" in text
@@ -123,7 +126,8 @@ def test_flight_between_two_watched_airports_renders_as_one_line():
     text = render_digest(store, make_config())
     assert "🔁 <b>Between your airports</b>" in text
     assert "🚨 <b>N265AK</b>" in text                    # arrival phase is the live one
-    assert "departed 9:04 AM PDT → 21,000 ft · 415 kts · 62 NM out" in text
+    assert "departed 9:04 AM PDT → ETA" in text
+    assert "21,000 ft · 415 kts · 62 NM out" in text
     assert text.count("N265AK") == 1                     # merged: not repeated in Arr/Dep sections
     assert "🛬 <b>Arrivals</b>" not in text
     assert "🛫 <b>Departures</b>" not in text

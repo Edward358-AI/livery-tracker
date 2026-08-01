@@ -59,14 +59,10 @@ def _leg_detail(event: FlightEvent) -> str:
             bits.append(f"{tele['gs']:.0f} kts")
         if tele.get("dist_nm") is not None:
             bits.append(f"{tele['dist_nm']:.0f} NM {'out' if event.type == EventType.ARRIVAL else 'away'}")
-        if bits:
-            return " · ".join(bits)
-        # Nothing received yet: show the scheduled time and say plainly why
-        # there are no figures, rather than an opaque "live tracking active".
-        detail = (
-            f"{when_label} {fmt_local(event.scheduled_time)} — polling, "
-            "no ADS-B contact yet"
-        )
+        # The expected time stays on the line even once telemetry is flowing:
+        # "48 NM out" alone never says whether that is early, late, or on time.
+        detail = f"{when_label} {fmt_local(event.scheduled_time)} — "
+        detail += " · ".join(bits) if bits else "polling, no ADS-B contact yet"
         if event.status_note:
             detail += f" ({event.status_note})"
         return detail

@@ -738,14 +738,16 @@ async def job_poll(context: ContextTypes.DEFAULT_TYPE) -> None:
     # while the source still says "on time".
     if not finished and now > event.scheduled_time + NO_SHOW_GRACE:
         late = round((now - event.scheduled_time).total_seconds() / 60)
+        # The digest already prints the expected time and the distance, so the
+        # note only carries what those two can't say: how late it is running.
         if (
             event.type == EventType.ARRIVAL
             and dist_nm is not None
             and dist_nm > ARRIVAL_LATE_MIN_DIST_NM
         ):
-            event.status_note = f"running {late}m late — {dist_nm:.0f} NM out"
+            event.status_note = f"running {late}m late"
         elif event.type == EventType.DEPARTURE and telemetry.on_ground:
-            event.status_note = f"{late}m past ETD — still on the ground"
+            event.status_note = f"running {late}m late — still on the ground"
 
     # Hard cap: don't chase a leg that never resolves (holding forever, bad data).
     if not finished and now > event.scheduled_time + LIVE_MAX_OVERRUN:
