@@ -1014,9 +1014,15 @@ def _register_new_events(
             (ev for ev in store.events.values() if _same_flight_leg(ev, event)), None
         )
         if existing is not None:
-            # Same flight with a drifted estimate: update, don't duplicate.
+            # Same flight with a drifted estimate: update, don't duplicate —
+            # but only while the mirror still owns this leg's schedule
+            # (_syncable, the same boundary the sync respects). Once ADS-B has
+            # the aircraft in sight, the displayed time is the one the sync
+            # last reconciled together with its delay note; nudging the time
+            # here would leave that note, which only the sync recomputes,
+            # quietly disagreeing with it.
             drift = (event.scheduled_time - existing.scheduled_time).total_seconds()
-            if not existing.status.terminal and abs(drift) >= 60:
+            if _syncable(existing) and abs(drift) >= 60:
                 existing.scheduled_time = event.scheduled_time
                 store.upsert(existing)
                 if existing.status in (EventState.WAITING_2H, EventState.WAITING_LIVE):

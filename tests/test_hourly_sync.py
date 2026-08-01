@@ -335,6 +335,73 @@ def test_a_dark_transponder_is_not_positive_evidence(monkeypatch):
     assert store.get("arr").status == EventState.WAITING_2H
 
 
+# -- discovery respects the same custody boundary as the sync ------------------
+
+def arrival_row(when, number="AS1052") -> dict:
+    return {
+        "identification": {"number": {"default": number}},
+        "airport": {
+            "origin": {"code": {"iata": "SEA", "icao": "KSEA"}},
+            "destination": {"code": {"iata": "SFO", "icao": "KSFO"}},
+        },
+        "time": {
+            "scheduled": {
+                "arrival": int(when.timestamp()),
+                "departure": int((when - timedelta(hours=2)).timestamp()),
+            },
+            "estimated": {},
+        },
+        "status": {"generic": {"status": {"text": "scheduled"}}},
+    }
+
+
+def test_discovery_leaves_a_live_leg_the_sync_has_released_alone(monkeypatch):
+    """The observed 2-minute drift: discovery nudged a live leg's time while
+    its delay note — which only the adopt path recomputes — stayed put, so
+    the two disagreed. Live-with-contact belongs to ADS-B, not to discovery."""
+    live = pending_leg(status=EventState.LIVE, status_note="delayed 82m")
+    live.last_telemetry = {"lat": 37.6, "lon": -122.4, "alt": 0, "gs": 13.0}
+    # A second, still-pending leg is what pulls this tail into the sync pass
+    # at all (exactly the N24988 shape: tomorrow's inbound alongside today's).
+    tomorrow = pending_leg(
+        id="tomorrow", flight_number="AS1099",
+        scheduled_time=NOW + timedelta(hours=20),
+    )
+    app, store = app_with(live, tomorrow)
+    original = live.scheduled_time
+
+    run_sync(app, monkeypatch,
+             rows=[arrival_row(original + timedelta(minutes=5))],
+             refresh=lambda reg, ev: LegRefresh(ev.scheduled_time))
+
+    survivor = store.get("arr")
+    assert survivor.scheduled_time == original, "discovery must not nudge it"
+    assert survivor.status_note == "delayed 82m", "...leaving the note inconsistent"
+
+
+def test_discovery_still_updates_a_drifted_pending_leg(monkeypatch):
+    leg = pending_leg()
+    app, store = app_with(leg)
+    drifted = leg.scheduled_time + timedelta(minutes=5)
+
+    run_sync(app, monkeypatch, rows=[arrival_row(drifted)],
+             refresh=lambda reg, ev: LegRefresh(ev.scheduled_time))
+
+    assert store.get("arr").scheduled_time == drifted
+
+
+def test_discovery_still_updates_a_live_leg_adsb_has_never_seen(monkeypatch):
+    """Never-seen live legs stay in the mirror's custody, so they still track."""
+    leg = pending_leg(status=EventState.LIVE)
+    app, store = app_with(leg)
+    drifted = leg.scheduled_time + timedelta(minutes=5)
+
+    run_sync(app, monkeypatch, rows=[arrival_row(drifted)],
+             refresh=lambda reg, ev: LegRefresh(ev.scheduled_time))
+
+    assert store.get("arr").scheduled_time == drifted
+
+
 # -- the 15-minute hot lane ----------------------------------------------------
 
 def test_hot_sync_only_touches_tails_with_an_imminent_leg(monkeypatch):
