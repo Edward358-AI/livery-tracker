@@ -279,7 +279,9 @@ year permanently. Position and schedules are always fetched live. Add
 ## Reading the digest
 
 The digest bot keeps **one message per day**, edited in place as flights
-progress (yesterday's digest is deleted each morning). If your watchlist grows
+progress (yesterday's digest is deleted each morning). Each registration shows
+its equipment type code when known — `N538AS (B739) "Star Wars"` — pulled from
+the aircraft dossier cache, so it fills in automatically as tails get resolved. If your watchlist grows
 past what a single Telegram message can hold (~4096 characters, roughly 45
 legs), the digest automatically continues into additional messages — each still
 edited in place, so it never stops updating no matter how many aircraft you

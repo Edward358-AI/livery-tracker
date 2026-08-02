@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from datetime import datetime, timedelta
 
 from telegram import Bot
@@ -86,6 +87,33 @@ def _leg_detail(event: FlightEvent) -> str:
     return detail
 
 
+# Equipment type codes (B739, A388, ...) come from the aircraft dossier
+# cache. Loaded at most every few minutes, so rendering never does a file
+# read per leg; a tail without a known code simply shows no label.
+_TYPE_CODES: dict[str, str] = {}
+_type_codes_loaded = 0.0
+_TYPE_CODE_TTL = 600.0
+
+
+def _type_code(tail: str) -> str:
+    global _TYPE_CODES, _type_codes_loaded
+    from . import aircraft
+
+    now = time.monotonic()
+    if now - _type_codes_loaded > _TYPE_CODE_TTL:
+        _TYPE_CODES = {
+            reg.upper(): str(entry.get("type_code") or "").upper()
+            for reg, entry in aircraft.load_cache().items()
+        }
+        _type_codes_loaded = now
+    return _TYPE_CODES.get(tail.upper(), "")
+
+
+def _tail_label(tail: str) -> str:
+    code = _type_code(tail)
+    return f"<b>{tail}</b> ({code})" if code else f"<b>{tail}</b>"
+
+
 def format_leg(event: FlightEvent, show_airport: bool = True) -> str:
     """One leg. `show_airport` is off when the section header already names it."""
     livery = f' "{event.livery}"' if event.livery else ""
@@ -93,7 +121,7 @@ def format_leg(event: FlightEvent, show_airport: bool = True) -> str:
     route = f"{event.route_origin}➔{event.route_destination}{flight}"
     emoji = STATE_EMOJI.get(event.status, "•")
     where = f" @ {event.target_airport}" if show_airport else ""
-    return f"{emoji} <b>{event.tail}</b>{livery} — {route}{where}, {_leg_detail(event)}"
+    return f"{emoji} {_tail_label(event.tail)}{livery} — {route}{where}, {_leg_detail(event)}"
 
 
 def _merged_line(dep: FlightEvent, arr: FlightEvent) -> str:
@@ -104,7 +132,7 @@ def _merged_line(dep: FlightEvent, arr: FlightEvent) -> str:
     # Show the emoji of the phase currently in progress; once airborne, the arrival's.
     current = dep if not dep.status.terminal else arr
     emoji = STATE_EMOJI.get(current.status, "•")
-    return f"{emoji} <b>{dep.tail}</b>{livery} — {route}, {_leg_detail(dep)} → {_leg_detail(arr)}"
+    return f"{emoji} {_tail_label(dep.tail)}{livery} — {route}, {_leg_detail(dep)} → {_leg_detail(arr)}"
 
 
 MAX_PAIR_GAP = timedelta(hours=20)  # dep and arr legs of one flight are at most this far apart

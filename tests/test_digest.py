@@ -84,6 +84,34 @@ def test_render_sections_and_states():
     assert "Updated" in text
 
 
+def test_type_code_appears_next_to_the_registration(monkeypatch):
+    import livery_tracker.digest as digest_mod
+    from livery_tracker import aircraft
+
+    aircraft.record_profile("N265AK", {"type_code": "B739"})
+    monkeypatch.setattr(digest_mod, "_TYPE_CODES", {})
+    monkeypatch.setattr(digest_mod, "_type_codes_loaded", 0.0)
+
+    store = FlightStore()
+    store.upsert(make_event("a1", EventType.ARRIVAL, EventState.WAITING_2H))
+    text = render_digest(store, make_config())
+
+    assert "<b>N265AK</b> (B739)" in text
+
+
+def test_missing_type_code_renders_without_a_label(monkeypatch):
+    import livery_tracker.digest as digest_mod
+
+    monkeypatch.setattr(digest_mod, "_TYPE_CODES", {})
+    monkeypatch.setattr(digest_mod, "_type_codes_loaded", 0.0)
+
+    store = FlightStore()
+    store.upsert(make_event("a1", EventType.ARRIVAL, EventState.WAITING_2H))
+    text = render_digest(store, make_config())
+
+    assert "<b>N265AK</b> (" not in text, "no cached code -> no label, no clutter"
+
+
 def test_render_lost_state():
     store = FlightStore()
     store.upsert(make_event("x", EventType.ARRIVAL, EventState.LOST))
