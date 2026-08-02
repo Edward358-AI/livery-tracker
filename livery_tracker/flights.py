@@ -213,8 +213,13 @@ class FlightStore:
         self.reload()
 
     @staticmethod
-    def _snapshot(event: FlightEvent) -> tuple[str, str, str]:
-        return (event.status.value, event.scheduled_time.isoformat(), event.status_note)
+    def _snapshot(event: FlightEvent) -> tuple[str, str, str, str]:
+        return (
+            event.status.value,
+            event.scheduled_time.isoformat(),
+            event.status_note,
+            event.flight_number,
+        )
 
     def reload(self) -> None:
         path = flights_file()
@@ -241,6 +246,8 @@ class FlightStore:
                 change["time"] = [old[1], new[1]]
             if old[2] != new[2]:
                 change["note"] = [old[2], new[2]]
+            if old[3] != new[3]:
+                change["flight_number"] = [old[3], new[3]]
             # A late-running LIVE leg recomputes its lateness note every
             # poll; journaling each tick would bury the real transitions.
             if not (set(change) == {"note"} and event.status == EventState.LIVE):
