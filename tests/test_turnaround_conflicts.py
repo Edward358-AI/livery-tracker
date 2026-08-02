@@ -395,6 +395,26 @@ def test_foreign_callsign_keeps_the_hold_from_flapping(monkeypatch):
     assert store.get(leg.id).status == EventState.TURNAROUND_DELAY
 
 
+def test_discovery_carries_a_rows_cancellation():
+    """A flight already cancelled at discovery time builds directly as ❌ —
+    and therefore can never revive a previously cancelled leg."""
+    stamp = lambda when: int(when.timestamp())
+    row = {
+        "identification": {"number": {"default": "UA1007"}},
+        "airport": {
+            "origin": {"code": {"iata": "SFO", "icao": "KSFO"}},
+            "destination": {"code": {"iata": "SEA", "icao": "KSEA"}},
+        },
+        "time": {"scheduled": {"departure": stamp(NOW + timedelta(hours=4))}},
+        "status": {"generic": {"status": {"text": "Canceled"}}},
+    }
+
+    events = rows_to_events("N475UA", "Retro", [row], sfo_config(), now=NOW)
+
+    assert len(events) == 1
+    assert events[0].status == EventState.CANCELLED
+
+
 def test_rebuild_harvest_retains_recently_overdue_estimated_departure():
     """A stale but explicitly estimated departure stays discoverable for six hours."""
     now = NOW

@@ -20,7 +20,7 @@ from bs4 import BeautifulSoup
 from curl_cffi import requests as curl_requests
 
 from .config import Config
-from .flights import EventType, FlightEvent
+from .flights import EventState, EventType, FlightEvent
 from .throttle import MISS, MinInterval, TTLCache
 
 log = logging.getLogger(__name__)
@@ -251,6 +251,13 @@ def rows_to_events(
                     route_origin=origin_iata or origin_icao or "???",
                     route_destination=dest_iata or dest_icao or "???",
                     flight_number=flight_no,
+                    # Carry the row's own cancellation, so a flight already
+                    # cancelled at discovery shows ❌ directly — and so a
+                    # cancelled row can never revive a cancelled leg.
+                    status=(
+                        EventState.CANCELLED if row_is_cancelled(row)
+                        else EventState.WAITING_2H
+                    ),
                 )
             )
     return events

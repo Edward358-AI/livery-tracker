@@ -64,6 +64,41 @@ def test_register_updates_existing_leg_instead_of_duplicating():
     assert len(store.events) == 2
 
 
+def test_source_can_revive_a_swapped_leg():
+    """The AS751 case: swapped off in the morning, swapped back on by noon.
+    A terminal 🔀 must not keep the flight dead for the rest of the day once
+    the source lists it for this tail again."""
+    store = FlightStore()
+    dead = leg(0, status=EventState.SWAPPED)
+    dead.status_note = "aircraft now operating AS1603"
+    store.upsert(dead)
+    app = FakeApp(store)
+
+    added = _register_new_events(app, [leg(6, id="fresh")])
+
+    survivor = store.get(dead.id)
+    assert survivor.status == EventState.WAITING_2H
+    assert survivor.status_note == ""
+    assert survivor.scheduled_time == NOW + timedelta(minutes=6)
+    assert added == [survivor], "a revival is reportable news"
+    assert len(store.events) == 1, "revived in place, not duplicated"
+
+
+def test_a_cancelled_row_never_revives_a_cancelled_leg():
+    """Cancelled rows keep appearing in the source all day; discovery now
+    carries that flag, so re-finding one must not flap the leg back open."""
+    store = FlightStore()
+    dead = leg(0, status=EventState.CANCELLED)
+    store.upsert(dead)
+
+    added = _register_new_events(
+        FakeApp(store), [leg(4, id="fresh", status=EventState.CANCELLED)]
+    )
+
+    assert added == []
+    assert store.get(dead.id).status == EventState.CANCELLED
+
+
 def test_register_does_not_touch_terminal_legs():
     store = FlightStore()
     done = leg(0, status=EventState.DEPARTED)

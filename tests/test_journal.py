@@ -179,6 +179,25 @@ def context_for(app, event):
     )
 
 
+def test_board_discovery_writes_under_its_own_tag(monkeypatch):
+    """Job contexts leak between jobs more than designed for: without its own
+    tag, board discovery's writes were journaled under whatever label another
+    job left behind (observed as a poll-tagged schedule change)."""
+    store = FlightStore()
+    app = FakeApp(store, sfo_config())
+    set_journal_context("poll.detection")  # a stale tag left by another job
+    monkeypatch.setattr(
+        tracker.schedule_provider, "harvest_airport_boards",
+        lambda cfg, now=None: ([make_leg()], True),
+    )
+
+    asyncio.run(tracker.run_board_discovery(app))
+
+    row = journal_rows()[-1]
+    assert row["change"]["created"] is True
+    assert row["trigger"] == "board_discovery"
+
+
 def test_sync_withdrawal_is_journaled_with_trigger_and_evidence(monkeypatch):
     store = FlightStore()
     store.upsert(make_leg())

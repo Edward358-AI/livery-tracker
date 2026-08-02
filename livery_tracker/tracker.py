@@ -746,7 +746,24 @@ async def job_poll(context: ContextTypes.DEFAULT_TYPE) -> None:
             and dist_nm is not None
             and dist_nm > ARRIVAL_LATE_MIN_DIST_NM
         ):
-            event.status_note = f"running {late}m late"
+            # An airborne arrival past its stored ETA: that ETA is stale by
+            # construction (custody passed to ADS-B at first contact and
+            # nothing has updated it since), and it is exactly the number a
+            # spotter plans around. Mirror the source's live estimate —
+            # memoised, ~1 real read per 5 min while the lateness lasts.
+            refresh = await asyncio.to_thread(
+                schedule_provider.refresh_leg_time, event.tail, event
+            )
+            set_journal_context(
+                "poll.late_arrival", _journal_evidence(telemetry, refresh)
+            )
+            if (
+                refresh.new_time is not None
+                and abs((refresh.new_time - event.scheduled_time).total_seconds()) >= 60
+            ):
+                _apply_schedule(event, refresh)
+            else:
+                event.status_note = f"running {late}m late"
         elif event.type == EventType.DEPARTURE and telemetry.on_ground:
             # A visible, overdue, parked departure gets the same source checks
             # a dark one does — otherwise its stored time fossilizes (nothing
@@ -1053,6 +1070,28 @@ def _register_new_events(
             (ev for ev in store.events.values() if _same_flight_leg(ev, event)), None
         )
         if existing is not None:
+            # What the source killed, the source can revive: a leg withdrawn
+            # as swapped (or discovered cancelled) whose flight the source now
+            # lists for this tail again comes back as a normal pending leg —
+            # swap-backs are as routine as swaps (AS751 was swapped off
+            # N537AS and back on within a morning). Observed conclusions
+            # (landed/departed/diverted) and LOST stay locked; an incoming
+            # cancelled row never revives anything.
+            if (
+                existing.status in (EventState.SWAPPED, EventState.CANCELLED)
+                and not event.status.terminal
+            ):
+                existing.status = EventState.WAITING_2H
+                existing.status_note = ""
+                existing.scheduled_time = event.scheduled_time
+                store.upsert(existing)
+                schedule_event_jobs(application, existing)
+                created.append(existing)
+                log.info(
+                    "Leg %s revived: the source lists %s for this tail again",
+                    existing.id, existing.flight_number,
+                )
+                continue
             # Same flight with a drifted estimate: update, don't duplicate —
             # but only while the mirror still owns this leg's schedule
             # (_syncable, the same boundary the sync respects). Once ADS-B has
@@ -1638,6 +1677,11 @@ async def run_board_discovery(application: Application) -> int | None:
         log.info("Harvest in progress — board discovery skipped")
         return None
     async with _harvest_lock:
+        # Without its own tag, this job's writes get journaled under whatever
+        # label another job left behind — job contexts are not as isolated as
+        # the ContextVar design assumed (observed as a poll-tagged row
+        # changing a pending leg's time).
+        set_journal_context("board_discovery")
         config: Config = application.bot_data["config"]
         if not (config.watchlist and config.target_airports):
             return 0

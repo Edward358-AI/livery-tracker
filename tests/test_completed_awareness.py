@@ -326,6 +326,59 @@ def test_no_source_change_keeps_the_honest_lateness_note(monkeypatch):
     assert survivor.scheduled_time == NOW - timedelta(minutes=20), "time untouched"
 
 
+# -- a late airborne arrival mirrors the source's live ETA ----------------------
+
+def airborne_inbound(callsign="UAL2077") -> Telemetry:
+    return Telemetry(lat=42.0, lon=-122.0, alt_ft=39_000, on_ground=False,
+                     gs_kts=439.0, baro_rate=0, callsign=callsign, source="test")
+
+
+def test_late_airborne_arrival_mirrors_the_sources_eta(monkeypatch):
+    """The N14219 case: ETA fossilized at go-live while the flight departed
+    late — the digest showed 3:35 with the aircraft still 182 NM out."""
+    store, config = FlightStore(), sfo_config()
+    leg = make_leg(
+        EventType.ARRIVAL, EventState.LIVE,
+        when=NOW - timedelta(minutes=20), number="UA2077",
+    )
+    store.upsert(leg)
+    app = FakeApp(store, config)
+    new_eta = NOW + timedelta(minutes=25)
+    monkeypatch.setattr(
+        tracker.schedule_provider, "refresh_leg_time",
+        lambda reg, event: LegRefresh(new_eta, delay_minutes=37),
+    )
+    monkeypatch.setattr(tracker, "fetch_telemetry", lambda reg: airborne_inbound())
+
+    asyncio.run(tracker.job_poll(context_for(app, leg)))
+
+    survivor = store.get(leg.id)
+    assert survivor.status == EventState.LIVE, "still inbound — polling continues"
+    assert survivor.scheduled_time == new_eta
+    assert survivor.status_note == "delayed 37m"
+
+
+def test_late_airborne_arrival_with_no_source_news_keeps_the_late_note(monkeypatch):
+    store, config = FlightStore(), sfo_config()
+    leg = make_leg(
+        EventType.ARRIVAL, EventState.LIVE,
+        when=NOW - timedelta(minutes=20), number="UA2077",
+    )
+    store.upsert(leg)
+    app = FakeApp(store, config)
+    monkeypatch.setattr(
+        tracker.schedule_provider, "refresh_leg_time",
+        lambda reg, event: LegRefresh(event.scheduled_time),
+    )
+    monkeypatch.setattr(tracker, "fetch_telemetry", lambda reg: airborne_inbound())
+
+    asyncio.run(tracker.job_poll(context_for(app, leg)))
+
+    survivor = store.get(leg.id)
+    assert re.fullmatch(r"running 2\dm late", survivor.status_note)
+    assert survivor.scheduled_time == NOW - timedelta(minutes=20), "time untouched"
+
+
 # -- rebuild keeps the observed past, re-derives the rest -----------------------
 
 def test_rebuild_keeps_observed_conclusions_and_clears_derived_ones(monkeypatch):
