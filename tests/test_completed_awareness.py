@@ -358,6 +358,31 @@ def test_late_airborne_arrival_mirrors_the_sources_eta(monkeypatch):
     assert survivor.status_note == "delayed 37m"
 
 
+def test_early_airborne_arrival_mirrors_the_sources_eta(monkeypatch):
+    """A long-haul gaining 30 minutes: the ETA must walk earlier while the
+    flight is still far out — the difference between catching and missing it."""
+    store, config = FlightStore(), sfo_config()
+    leg = make_leg(
+        EventType.ARRIVAL, EventState.LIVE,
+        when=NOW + timedelta(minutes=40), number="UA2077",
+    )
+    store.upsert(leg)
+    app = FakeApp(store, config)
+    new_eta = NOW + timedelta(minutes=10)
+    monkeypatch.setattr(
+        tracker.schedule_provider, "refresh_leg_time",
+        lambda reg, event: LegRefresh(new_eta, delay_minutes=-30),
+    )
+    monkeypatch.setattr(tracker, "fetch_telemetry", lambda reg: airborne_inbound())
+
+    asyncio.run(tracker.job_poll(context_for(app, leg)))
+
+    survivor = store.get(leg.id)
+    assert survivor.status == EventState.LIVE
+    assert survivor.scheduled_time == new_eta, "earliness mirrored, not just lateness"
+    assert survivor.status_note == "early 30m"
+
+
 def test_late_airborne_arrival_with_no_source_news_keeps_the_late_note(monkeypatch):
     store, config = FlightStore(), sfo_config()
     leg = make_leg(

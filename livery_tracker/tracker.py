@@ -734,37 +734,38 @@ async def job_poll(context: ContextTypes.DEFAULT_TYPE) -> None:
             event.status_note = stamp
             finished = True
 
-    # Obvious-delay annotations: the aircraft is visibly not where an on-time
-    # flight would be. State is untouched — this only keeps the digest honest
-    # while the source still says "on time".
+    # Keep the displayed time honest while a leg is live. State is untouched
+    # here — conclusions still come only from observation.
+    #
+    # A live arrival still far out mirrors the source's ETA continuously —
+    # not just when late. Earliness matters as much as lateness to a spotter
+    # (a long-haul running 30 minutes early is a missed shot), and the
+    # stored estimate froze at the last pending-side sync. Memoised: ~1 real
+    # read per 5 min per tracked arrival, only while it stays far out.
+    if (
+        not finished
+        and event.type == EventType.ARRIVAL
+        and dist_nm is not None
+        and dist_nm > ARRIVAL_LATE_MIN_DIST_NM
+    ):
+        refresh = await asyncio.to_thread(
+            schedule_provider.refresh_leg_time, event.tail, event
+        )
+        set_journal_context("poll.enroute_eta", _journal_evidence(telemetry, refresh))
+        if (
+            refresh.new_time is not None
+            and abs((refresh.new_time - event.scheduled_time).total_seconds()) >= 60
+        ):
+            _apply_schedule(event, refresh)
+        elif now > event.scheduled_time + NO_SHOW_GRACE:
+            # Source offers nothing newer, but the aircraft is visibly not
+            # going to make its time — say so rather than staying silent.
+            late = round((now - event.scheduled_time).total_seconds() / 60)
+            event.status_note = f"running {late}m late"
+
     if not finished and now > event.scheduled_time + NO_SHOW_GRACE:
         late = round((now - event.scheduled_time).total_seconds() / 60)
-        # The digest already prints the expected time and the distance, so the
-        # note only carries what those two can't say: how late it is running.
-        if (
-            event.type == EventType.ARRIVAL
-            and dist_nm is not None
-            and dist_nm > ARRIVAL_LATE_MIN_DIST_NM
-        ):
-            # An airborne arrival past its stored ETA: that ETA is stale by
-            # construction (custody passed to ADS-B at first contact and
-            # nothing has updated it since), and it is exactly the number a
-            # spotter plans around. Mirror the source's live estimate —
-            # memoised, ~1 real read per 5 min while the lateness lasts.
-            refresh = await asyncio.to_thread(
-                schedule_provider.refresh_leg_time, event.tail, event
-            )
-            set_journal_context(
-                "poll.late_arrival", _journal_evidence(telemetry, refresh)
-            )
-            if (
-                refresh.new_time is not None
-                and abs((refresh.new_time - event.scheduled_time).total_seconds()) >= 60
-            ):
-                _apply_schedule(event, refresh)
-            else:
-                event.status_note = f"running {late}m late"
-        elif event.type == EventType.DEPARTURE and telemetry.on_ground:
+        if event.type == EventType.DEPARTURE and telemetry.on_ground:
             # A visible, overdue, parked departure gets the same source checks
             # a dark one does — otherwise its stored time fossilizes (nothing
             # else may touch a seen live leg) and a big gate delay would ride
