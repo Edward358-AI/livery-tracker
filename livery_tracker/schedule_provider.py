@@ -506,6 +506,25 @@ def _row_route(row: dict[str, Any]) -> tuple[str, str]:
     )
 
 
+def _row_end_codes(row: dict[str, Any], side: str) -> set[str]:
+    codes = (((row.get("airport") or {}).get(side)) or {}).get("code") or {}
+    return {str(codes.get("iata") or "").upper(), str(codes.get("icao") or "").upper()} - {""}
+
+
+def _row_serves_target(row: dict[str, Any], event: FlightEvent) -> bool:
+    """Whether the row's flight actually touches the leg's watched airport.
+
+    Airlines reuse flight numbers across routes day to day (WN1050 served
+    OAK, then the same number flew to BWI), so a number match alone can bind
+    a leg to a flight that never comes near the airport it is tracked
+    against. An arrival's row must terminate at the target; a departure's
+    must originate there. The far endpoint may change freely — a rerouted
+    origin is still the same arrival for the spotter.
+    """
+    side = "destination" if event.type == EventType.ARRIVAL else "origin"
+    return event.target_airport.upper() in _row_end_codes(row, side)
+
+
 def _best_leg_row(
     rows: list[dict[str, Any]], event: FlightEvent
 ) -> tuple[datetime, dict[str, Any]] | None:
@@ -514,13 +533,20 @@ def _best_leg_row(
     Identified by flight number first, then by the exact origin/destination
     pair. Matching on a single endpoint is not enough: an aircraft can have
     several departures from the same airport, and adopting a neighbouring
-    flight's time invents a delay that never happened.
+    flight's time invents a delay that never happened. A number match must
+    additionally still serve the leg's watched airport, or a reused number
+    on another route keeps a phantom leg alive with very real-looking times.
     """
     key = "arrival" if event.type == EventType.ARRIVAL else "departure"
     wanted_number = (event.flight_number or "").strip().upper()
     wanted_route = (event.route_origin, event.route_destination)
 
-    by_number = [r for r in rows if wanted_number and _row_flight_number(r) == wanted_number]
+    by_number = [
+        r for r in rows
+        if wanted_number
+        and _row_flight_number(r) == wanted_number
+        and _row_serves_target(r, event)
+    ]
     by_route = [r for r in rows if _row_route(r) == wanted_route]
 
     for pool in (by_number, by_route):

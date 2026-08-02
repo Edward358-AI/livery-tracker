@@ -89,6 +89,52 @@ def test_route_pair_matches_when_flight_number_changed():
     assert round((when - BASE).total_seconds() / 60) == 20
 
 
+def oak_arrival() -> FlightEvent:
+    return FlightEvent(
+        id="oak", tail="N8655D", livery="New Mexico One", type=EventType.ARRIVAL,
+        target_airport="OAK", scheduled_time=BASE,
+        route_origin="PHX", route_destination="OAK", flight_number="WN1050",
+    )
+
+
+def test_a_reused_number_on_another_route_is_not_matched():
+    """The N8655D case: WN1050 served OAK, then the same number flew to BWI.
+    A number match must still serve the watched airport, or the phantom leg
+    keeps adopting very real-looking times from a flight going elsewhere."""
+    rows = [row("WN1050", "PHX", "BWI", 10)]
+    assert sp._best_leg_row(rows, oak_arrival()) is None
+
+
+def test_a_rerouted_origin_still_matches_an_arrival():
+    """Only the watched end is identity: WN1050 from LAS instead of PHX is
+    still the same OAK arrival for the spotter."""
+    rows = [row("WN1050", "LAS", "OAK", 10)]
+    when, matched = sp._best_leg_row(rows, oak_arrival())
+    assert sp._row_flight_number(matched) == "WN1050"
+
+
+def test_a_departure_number_match_requires_our_origin():
+    departure = FlightEvent(
+        id="dep", tail="N8655D", livery="", type=EventType.DEPARTURE,
+        target_airport="OAK", scheduled_time=BASE,
+        route_origin="OAK", route_destination="SAN", flight_number="WN295",
+    )
+    assert sp._best_leg_row([row("WN295", "PHX", "BWI", 10)], departure) is None
+    assert sp._best_leg_row([row("WN295", "OAK", "BWI", 10)], departure) is not None
+
+
+def test_number_reuse_elsewhere_reports_gone_not_swapped(monkeypatch):
+    """Both lookups see only the BWI flight: the leg is gone from our airport,
+    but the aircraft still flies that number — "swapped" would be a lie."""
+    monkeypatch.setattr(
+        sp, "fetch_flight_list",
+        lambda q, fetch_by="reg": [row("WN1050", "PHX", "BWI", 10)],
+    )
+    result = sp.refresh_leg_time("N8655D", oak_arrival())
+    assert result.new_time is None
+    assert result.swapped is False and result.cancelled is False
+
+
 def test_cancellation_still_beats_swap_detection(monkeypatch):
     def fake_fetch(query, fetch_by="reg"):
         if fetch_by == "reg":
