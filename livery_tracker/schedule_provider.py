@@ -440,6 +440,9 @@ class LegRefresh:
     delay_minutes: int | None = None  # source's own estimated-vs-scheduled figure
     completed: bool = False           # the source records this leg as already flown
     real_time: datetime | None = None  # the source's actual off/on time, if recorded
+    matched_number: str = ""  # flight number of the row actually matched — differs
+    #                           from the leg's own when the by-route fallback caught
+    #                           a renumbered movement
 
 
 def _row_completed(row: dict[str, Any], key: str) -> tuple[bool, datetime | None]:
@@ -548,6 +551,7 @@ def refresh_leg_time(reg: str, event: FlightEvent) -> LegRefresh:
         return LegRefresh(
             best[0], cancelled=row_is_cancelled(best[1]), delay_minutes=delay,
             completed=completed, real_time=real_time,
+            matched_number=_row_flight_number(best[1]),
         )
 
     # Our aircraft no longer lists this flight. Ask about the flight itself:

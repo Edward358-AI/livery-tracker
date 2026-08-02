@@ -135,6 +135,7 @@ def _journal_evidence(
             "completed": refresh.completed,
             "delay_minutes": refresh.delay_minutes,
             "real_time": refresh.real_time.isoformat() if refresh.real_time else None,
+            "matched_number": refresh.matched_number,
         }
     return evidence
 
@@ -1345,6 +1346,42 @@ def _syncable(event: FlightEvent) -> bool:
     return event.status in SYNC_STATES or _never_seen_live(event)
 
 
+RENUMBER_MATCH_TOLERANCE = timedelta(hours=6)  # same bound _best_leg_row uses
+
+
+def _renumbered_sibling(
+    store: FlightStore, leg: FlightEvent, refresh: schedule_provider.LegRefresh
+) -> FlightEvent | None:
+    """The same movement, already tracked under the number the source now uses.
+
+    When a leg's refresh only matched by route (the source stopped listing
+    its number for this tail), the by-route fallback keeps it tracking — the
+    right call while it is the only copy. But once discovery has registered
+    the movement under its current number, this leg is a stale twin: the
+    aircraft was, in every sense that matters, swapped off the old number.
+    (Observed as AS1625 and AS1603 side by side for one N537AS arrival.)
+    """
+    matched = (refresh.matched_number or "").strip().upper()
+    if not matched or matched == (leg.flight_number or "").strip().upper():
+        return None
+    if refresh.new_time is None:
+        return None
+    for other in store.events.values():
+        if (
+            other.id != leg.id
+            and other.tail == leg.tail
+            and other.type == leg.type
+            and other.target_airport == leg.target_airport
+            and other.route_origin == leg.route_origin
+            and other.route_destination == leg.route_destination
+            and (other.flight_number or "").strip().upper() == matched
+            and abs((other.scheduled_time - refresh.new_time).total_seconds())
+            <= RENUMBER_MATCH_TOLERANCE.total_seconds()
+        ):
+            return other
+    return None
+
+
 async def job_hourly_sync(context: ContextTypes.DEFAULT_TYPE) -> None:
     await run_schedule_sync(context.application)
 
@@ -1445,6 +1482,23 @@ async def _run_sync_locked(
                 _cancel_jobs(application, leg.id)
                 counts["withdrawn"] += 1
                 changed = True
+                continue
+            twin = _renumbered_sibling(store, leg, refresh)
+            if twin is not None:
+                set_journal_context(
+                    f"{sync_tag}.renumbered", _journal_evidence(refresh=refresh)
+                )
+                leg.status = EventState.SWAPPED
+                leg.status_note = f"aircraft now operating {refresh.matched_number}"
+                store.upsert(leg)
+                append_history(leg)
+                _cancel_jobs(application, leg.id)
+                counts["withdrawn"] += 1
+                changed = True
+                log.info(
+                    "Leg %s withdrawn: movement now tracked as %s (%s)",
+                    leg.id, refresh.matched_number, twin.id,
+                )
                 continue
             if _never_seen_live(leg) and refresh.completed:
                 # Flew entirely inside a coverage gap; the source knows.

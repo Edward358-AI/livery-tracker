@@ -335,6 +335,69 @@ def test_a_dark_transponder_is_not_positive_evidence(monkeypatch):
     assert store.get("arr").status == EventState.WAITING_2H
 
 
+# -- a renumbered movement: the stale twin is swapped off ----------------------
+
+def renumber_refresh(matched="AS1603"):
+    """Refresh answers as the source would after renumbering AS1625->AS1603:
+    each leg's lookup lands on the AS1603 row (by number for the new leg, by
+    the route fallback for the stale one)."""
+    def refresh(reg, ev):
+        return LegRefresh(ev.scheduled_time, matched_number=matched)
+    return refresh
+
+
+def test_sync_swaps_off_the_stale_twin_of_a_renumbered_flight(monkeypatch):
+    """The observed N537AS case: one LAX->SFO arrival shown twice, as AS1625
+    and AS1603. The leg whose row only matched under the other's number is
+    the stale copy — the aircraft was swapped off it."""
+    stale = pending_leg(id="stale", flight_number="AS1625",
+                        status=EventState.WAITING_LIVE)
+    current = pending_leg(id="current", flight_number="AS1603")
+    app, store = app_with(stale, current)
+
+    counts = run_sync(app, monkeypatch, rows=[], refresh=renumber_refresh())
+
+    survivor = store.get("stale")
+    assert survivor.status == EventState.SWAPPED
+    assert survivor.status_note == "aircraft now operating AS1603"
+    assert store.get("current").status == EventState.WAITING_2H, \
+        "the leg carrying the source's current number is untouched"
+    assert counts["withdrawn"] == 1
+
+
+def test_sync_keeps_tracking_by_route_until_the_new_number_is_registered(monkeypatch):
+    """With no sibling yet, the by-route fallback is continuity, not a twin:
+    the leg keeps tracking so a renumber never makes us go blind."""
+    stale = pending_leg(id="stale", flight_number="AS1625")
+    app, store = app_with(stale)
+    new_time = stale.scheduled_time + timedelta(minutes=5)
+    monkeypatch_refresh = lambda reg, ev: LegRefresh(
+        new_time, delay_minutes=5, matched_number="AS1603"
+    )
+
+    run_sync(app, monkeypatch, rows=[], refresh=monkeypatch_refresh)
+
+    survivor = store.get("stale")
+    assert survivor.status == EventState.WAITING_2H
+    assert survivor.scheduled_time == new_time, "still mirrors the movement's time"
+
+
+def test_renumber_check_ignores_a_later_rotation_under_the_other_number(monkeypatch):
+    """A same-route AS1603 eight hours away is its own flight, not this
+    movement renamed — no withdrawal."""
+    stale = pending_leg(id="stale", flight_number="AS1625")
+    later = pending_leg(
+        id="later", flight_number="AS1603",
+        scheduled_time=stale.scheduled_time + timedelta(hours=8),
+    )
+    app, store = app_with(stale, later)
+
+    run_sync(app, monkeypatch, rows=[], refresh=renumber_refresh())
+
+    assert store.get("stale").status == EventState.WAITING_2H, \
+        "out-of-window sibling must not trigger the twin withdrawal"
+
+
 # -- discovery respects the same custody boundary as the sync ------------------
 
 def arrival_row(when, number="AS1052") -> dict:
