@@ -38,19 +38,9 @@ def test_same_flight_leg_tolerates_drift_but_not_other_flights():
     a = leg(0)
     assert _same_flight_leg(a, leg(4))            # the real WN3645 9:05/9:09 case
     assert not _same_flight_leg(a, leg(4 * 60))   # 4h apart: a different rotation
+    assert not _same_flight_leg(a, leg(4, flight_number="WN9999"))
     assert not _same_flight_leg(a, leg(4, type=EventType.ARRIVAL))
     assert not _same_flight_leg(a, leg(4, target_airport="SJC"))
-    assert not _same_flight_leg(a, leg(4, route_destination="SJC"))
-
-
-def test_a_renumbered_flight_is_one_movement_not_two():
-    """The observed N537AS case: LAX->SFO appeared twice at 8:39 AM, once as
-    AS1625 and once as AS1603. An aircraft cannot make the same arrival twice
-    minutes apart, so a differing number there is a renumber, not a flight."""
-    a = leg(0)
-    assert _same_flight_leg(a, leg(4, flight_number="WN9999"))
-    # ...but a genuinely later rotation under another number is its own leg.
-    assert not _same_flight_leg(a, leg(4 * 60, flight_number="WN9999"))
 
 
 def test_register_updates_existing_leg_instead_of_duplicating():
@@ -72,35 +62,6 @@ def test_register_updates_existing_leg_instead_of_duplicating():
     assert len(added) == 1  # genuinely different flight still gets created
     assert added[0].flight_number == "WN1242"  # the caller can report what was found
     assert len(store.events) == 2
-
-
-def test_register_adopts_the_sources_current_flight_number():
-    """One leg survives a renumber, carrying the number the source now uses."""
-    store = FlightStore()
-    stale = leg(0, status=EventState.WAITING_LIVE, flight_number="AS1625")
-    store.upsert(stale)
-    app = FakeApp(store)
-
-    added = _register_new_events(app, [leg(0, flight_number="AS1603", id="fresh")])
-
-    assert added == [], "a renumber is not a new flight"
-    assert len(store.events) == 1
-    assert store.get(stale.id).flight_number == "AS1603"
-
-
-def test_register_renumbers_a_live_leg_without_moving_its_time():
-    """Identity is corrected whatever the state (a live leg with a stale
-    number would fail the callsign guard), but the mirror still owns time."""
-    store = FlightStore()
-    live = leg(0, status=EventState.LIVE, flight_number="AS1625")
-    live.last_telemetry = {"lat": 37.6, "lon": -122.4, "alt": 3000}
-    store.upsert(live)
-
-    _register_new_events(FakeApp(store), [leg(6, flight_number="AS1603", id="fresh")])
-
-    survivor = store.get(live.id)
-    assert survivor.flight_number == "AS1603"
-    assert survivor.scheduled_time == NOW, "live-with-contact keeps its time"
 
 
 def test_register_does_not_touch_terminal_legs():

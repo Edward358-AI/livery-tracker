@@ -982,37 +982,21 @@ async def job_verify_conclusion(context: ContextTypes.DEFAULT_TYPE) -> None:
 # Harvesting
 # ---------------------------------------------------------------------------
 
-SAME_LEG_TOLERANCE = timedelta(hours=3)         # same number, estimate drifted
-RENUMBERED_TOLERANCE = timedelta(minutes=90)    # same movement, number changed
+SAME_LEG_TOLERANCE = timedelta(hours=3)
 
 
 def _same_flight_leg(a: FlightEvent, b: FlightEvent) -> bool:
-    """Same physical movement, however the source has labelled it.
-
-    Two things can differ between harvests without meaning two flights: the
-    estimated time (ids embed it, so ids alone can't dedupe) and the flight
-    number, when an airline renumbers a movement. The number is an attribute
-    of a movement rather than its identity — one aircraft cannot make the
-    same departure twice minutes apart, so matching tail, direction, airport
-    and route at nearly the same time is one leg even under two numbers
-    (observed as AS1625 and AS1603 side by side in the digest).
-
-    A renumber is held to a tighter window than ordinary drift, because the
-    number is the one field that would otherwise tell two legs apart.
-    """
-    if not (
+    """Same physical flight leg, even if the estimated time drifted between
+    harvests (event ids embed the time, so ids alone can't dedupe this)."""
+    return (
         a.tail == b.tail
         and a.type == b.type
         and a.target_airport == b.target_airport
+        and a.flight_number == b.flight_number
         and a.route_origin == b.route_origin
         and a.route_destination == b.route_destination
-    ):
-        return False
-    same_number = (a.flight_number or "").upper() == (b.flight_number or "").upper()
-    tolerance = SAME_LEG_TOLERANCE if same_number else RENUMBERED_TOLERANCE
-    return (
-        abs((a.scheduled_time - b.scheduled_time).total_seconds())
-        <= tolerance.total_seconds()
+        and abs((a.scheduled_time - b.scheduled_time).total_seconds())
+        <= SAME_LEG_TOLERANCE.total_seconds()
     )
 
 
@@ -1030,13 +1014,6 @@ def _register_new_events(
             (ev for ev in store.events.values() if _same_flight_leg(ev, event)), None
         )
         if existing is not None:
-            # A renumbered movement: adopt the source's current number rather
-            # than keeping a stale one alive beside it. Identity is corrected
-            # whatever the leg's state — a live leg carrying the wrong number
-            # would fail the callsign guard against its own flight.
-            renumbered = bool(event.flight_number) and (
-                existing.flight_number != event.flight_number
-            )
             # Same flight with a drifted estimate: update, don't duplicate —
             # but only while the mirror still owns this leg's schedule
             # (_syncable, the same boundary the sync respects). Once ADS-B has
@@ -1045,21 +1022,11 @@ def _register_new_events(
             # here would leave that note, which only the sync recomputes,
             # quietly disagreeing with it.
             drift = (event.scheduled_time - existing.scheduled_time).total_seconds()
-            retimed = _syncable(existing) and abs(drift) >= 60
-            if renumbered:
-                log.info(
-                    "Leg %s renumbered: %s -> %s",
-                    existing.id, existing.flight_number or "?", event.flight_number,
-                )
-                existing.flight_number = event.flight_number
-            if retimed:
+            if _syncable(existing) and abs(drift) >= 60:
                 existing.scheduled_time = event.scheduled_time
-            if renumbered or retimed:
                 store.upsert(existing)
-            if retimed and existing.status in (
-                EventState.WAITING_2H, EventState.WAITING_LIVE
-            ):
-                schedule_event_jobs(application, existing)
+                if existing.status in (EventState.WAITING_2H, EventState.WAITING_LIVE):
+                    schedule_event_jobs(application, existing)
             continue
         store.upsert(event)
         schedule_event_jobs(application, event)
