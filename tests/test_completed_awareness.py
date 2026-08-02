@@ -8,6 +8,7 @@ conclusions survive, derived verdicts are re-derived.
 """
 
 import asyncio
+import re
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -230,6 +231,99 @@ def test_dark_leg_absence_is_ignored_before_the_older_deadline(monkeypatch):
     survivor = store.get(leg.id)
     assert survivor.status == EventState.LIVE, "15 minutes late proves nothing"
     assert "likely delayed" in survivor.status_note
+
+
+# -- a visible, overdue, parked departure re-checks the source ------------------
+
+def parked_at_sfo(callsign="UAL115") -> Telemetry:
+    return Telemetry(lat=37.6198, lon=-122.3748, alt_ft=0, on_ground=True,
+                     gs_kts=1.0, baro_rate=None, callsign=callsign, source="test")
+
+
+def overdue_departure(store) -> FlightEvent:
+    leg = make_leg(
+        EventType.DEPARTURE, EventState.LIVE,
+        when=NOW - timedelta(minutes=20), number="UA115",
+    )
+    store.upsert(leg)
+    return leg
+
+
+def test_big_gate_delay_stands_polling_down(monkeypatch):
+    """A seen aircraft's leg must not ride a stale clock into a false LOST:
+    a delay that leaves the live window hands the leg back to the mirror."""
+    store, config = FlightStore(), sfo_config()
+    leg = overdue_departure(store)
+    app = FakeApp(store, config)
+    new_time = NOW + timedelta(hours=2)
+    monkeypatch.setattr(
+        tracker.schedule_provider, "refresh_leg_time",
+        lambda reg, event: LegRefresh(new_time, delay_minutes=140),
+    )
+    monkeypatch.setattr(tracker, "fetch_telemetry", lambda reg: parked_at_sfo())
+
+    ctx = context_for(app, leg)
+    asyncio.run(tracker.job_poll(ctx))
+
+    survivor = store.get(leg.id)
+    assert survivor.status == EventState.WAITING_LIVE
+    assert survivor.scheduled_time == new_time
+    assert survivor.status_note == "delayed 140m"
+    assert ctx.job.schedule_removal.called, "polling must stand down"
+
+
+def test_small_gate_delay_keeps_polling_against_the_new_time(monkeypatch):
+    store, config = FlightStore(), sfo_config()
+    leg = overdue_departure(store)
+    app = FakeApp(store, config)
+    new_time = NOW + timedelta(minutes=30)
+    monkeypatch.setattr(
+        tracker.schedule_provider, "refresh_leg_time",
+        lambda reg, event: LegRefresh(new_time, delay_minutes=50),
+    )
+    monkeypatch.setattr(tracker, "fetch_telemetry", lambda reg: parked_at_sfo())
+
+    asyncio.run(tracker.job_poll(context_for(app, leg)))
+
+    survivor = store.get(leg.id)
+    assert survivor.status == EventState.LIVE, "still inside the live window"
+    assert survivor.scheduled_time == new_time
+    assert survivor.status_note == "delayed 50m"
+
+
+def test_late_cancellation_reaches_a_seen_live_leg(monkeypatch):
+    store, config = FlightStore(), sfo_config()
+    leg = overdue_departure(store)
+    app = FakeApp(store, config)
+    monkeypatch.setattr(
+        tracker.schedule_provider, "refresh_leg_time",
+        lambda reg, event: LegRefresh(event.scheduled_time, cancelled=True),
+    )
+    monkeypatch.setattr(tracker, "fetch_telemetry", lambda reg: parked_at_sfo())
+
+    asyncio.run(tracker.job_poll(context_for(app, leg)))
+
+    assert store.get(leg.id).status == EventState.CANCELLED
+
+
+def test_no_source_change_keeps_the_honest_lateness_note(monkeypatch):
+    store, config = FlightStore(), sfo_config()
+    leg = overdue_departure(store)
+    app = FakeApp(store, config)
+    monkeypatch.setattr(
+        tracker.schedule_provider, "refresh_leg_time",
+        lambda reg, event: LegRefresh(event.scheduled_time),
+    )
+    monkeypatch.setattr(tracker, "fetch_telemetry", lambda reg: parked_at_sfo())
+
+    asyncio.run(tracker.job_poll(context_for(app, leg)))
+
+    survivor = store.get(leg.id)
+    assert survivor.status == EventState.LIVE
+    # The minute count rides the real clock (20 or 21 depending on when the
+    # suite reaches this test), so match the shape rather than the number.
+    assert re.fullmatch(r"running 2\dm late — still on the ground", survivor.status_note)
+    assert survivor.scheduled_time == NOW - timedelta(minutes=20), "time untouched"
 
 
 # -- rebuild keeps the observed past, re-derives the rest -----------------------

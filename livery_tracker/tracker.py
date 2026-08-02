@@ -748,7 +748,45 @@ async def job_poll(context: ContextTypes.DEFAULT_TYPE) -> None:
         ):
             event.status_note = f"running {late}m late"
         elif event.type == EventType.DEPARTURE and telemetry.on_ground:
-            event.status_note = f"running {late}m late — still on the ground"
+            # A visible, overdue, parked departure gets the same source checks
+            # a dark one does — otherwise its stored time fossilizes (nothing
+            # else may touch a seen live leg) and a big gate delay would ride
+            # into the 3h cap as a false LOST. Memoised: ~1 real read per
+            # 5 min, only while the aircraft sits here. A swapped/absent
+            # answer is deliberately ignored — we are looking at the aircraft.
+            refresh = await asyncio.to_thread(
+                schedule_provider.refresh_leg_time, event.tail, event
+            )
+            set_journal_context("poll.gate_delay", _journal_evidence(telemetry, refresh))
+            if refresh.cancelled:
+                event.status = EventState.CANCELLED
+                event.status_note = ""
+                store.upsert(event)
+                append_history(event)
+                await _digest(application).refresh()
+                context.job.schedule_removal()
+                log.info("Flight cancelled at the gate: %s", event.id)
+                return
+            if (
+                refresh.new_time is not None
+                and refresh.new_time > event.scheduled_time + DELAY_MIN_PUSHBACK
+            ):
+                _apply_schedule(event, refresh)
+                if event.scheduled_time - now > LIVE_LEAD:
+                    # The corrected ETD left the live window: hand the leg
+                    # back to the mirror and re-arm live start at its T-1h.
+                    event.status = EventState.WAITING_LIVE
+                    store.upsert(event)
+                    await _digest(application).refresh()
+                    schedule_event_jobs(application, event)
+                    context.job.schedule_removal()
+                    log.info(
+                        "Leg %s stood down until %s (gate delay)",
+                        event.id, event.scheduled_time,
+                    )
+                    return
+            else:
+                event.status_note = f"running {late}m late — still on the ground"
 
     # Hard cap: don't chase a leg that never resolves (holding forever, bad data).
     if not finished and now > event.scheduled_time + LIVE_MAX_OVERRUN:

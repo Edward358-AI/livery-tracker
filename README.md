@@ -377,7 +377,10 @@ a real departure at one end and a real arrival at the other.
   held until the schedule catches up.
 - `no ADS-B contact 47m past ETD — likely delayed` / `running 25m late` / `running
   32m late — still on the ground` — obvious-delay annotations from live position
-  (or the lack of one) while the source still says on time.
+  (or the lack of one) while the source still says on time. An overdue departure —
+  parked in view or dark alike — also re-checks the source every few minutes, so a
+  late-published delay or cancellation is caught even mid-live-tracking, and a
+  delay that leaves the live window stands polling down until the new T-1h.
 - `unverified — source unreachable` — the last sync could not reach the source;
   the leg is kept, flagged, and re-verified next pass.
 - `(confirmed by source)` / `(source disagrees)` — what the ~25-minute
