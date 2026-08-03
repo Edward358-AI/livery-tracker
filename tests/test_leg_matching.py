@@ -133,6 +133,13 @@ def test_number_reuse_elsewhere_reports_gone_not_swapped(monkeypatch):
     result = sp.refresh_leg_time("N8655D", oak_arrival())
     assert result.new_time is None
     assert result.swapped is False and result.cancelled is False
+    assert result.rerouted is True, "the number still flies — just not to OAK"
+
+
+def test_a_flight_gone_entirely_is_not_marked_rerouted(monkeypatch):
+    monkeypatch.setattr(sp, "fetch_flight_list", lambda q, fetch_by="reg": [])
+    result = sp.refresh_leg_time("N8655D", oak_arrival())
+    assert result.new_time is None and result.rerouted is False
 
 
 def test_cancellation_still_beats_swap_detection(monkeypatch):

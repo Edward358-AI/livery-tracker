@@ -136,6 +136,7 @@ def _journal_evidence(
             "delay_minutes": refresh.delay_minutes,
             "real_time": refresh.real_time.isoformat() if refresh.real_time else None,
             "matched_number": refresh.matched_number,
+            "rerouted": refresh.rerouted,
         }
     return evidence
 
@@ -1552,9 +1553,15 @@ async def _run_sync_locked(
                     f"{sync_tag}.withdrawn", _journal_evidence(refresh=refresh)
                 )
                 leg.status = EventState.SWAPPED
-                leg.status_note = (
-                    "now flown by another aircraft" if refresh.swapped else WITHDRAWN_NOTE
-                )
+                if refresh.swapped:
+                    leg.status_note = "now flown by another aircraft"
+                elif refresh.rerouted:
+                    # Not a swap in any real sense: the aircraft still flies
+                    # this number, but its route left our airport (WN1050
+                    # served OAK one day and BWI the next).
+                    leg.status_note = f"flight no longer serves {leg.target_airport}"
+                else:
+                    leg.status_note = WITHDRAWN_NOTE
                 store.upsert(leg)
                 append_history(leg)
                 _cancel_jobs(application, leg.id)

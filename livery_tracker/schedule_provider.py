@@ -450,6 +450,8 @@ class LegRefresh:
     matched_number: str = ""  # flight number of the row actually matched — differs
     #                           from the leg's own when the by-route fallback caught
     #                           a renumbered movement
+    rerouted: bool = False    # the flight number still flies, but its route no
+    #                           longer touches this leg's watched airport
 
 
 def _row_completed(row: dict[str, Any], key: str) -> tuple[bool, datetime | None]:
@@ -589,6 +591,10 @@ def refresh_leg_time(reg: str, event: FlightEvent) -> LegRefresh:
 
     # Our aircraft no longer lists this flight. Ask about the flight itself:
     # cancelled outright, or still running with a different tail (a swap)?
+    wanted = (event.flight_number or "").strip().upper()
+    rerouted = bool(wanted) and any(
+        _row_flight_number(r) == wanted for r in (fetch_flight_list(reg) or [])
+    )
     if event.flight_number:
         by_flight = _best_leg_row(
             fetch_flight_list(event.flight_number, fetch_by="flight") or [], event
@@ -597,7 +603,7 @@ def refresh_leg_time(reg: str, event: FlightEvent) -> LegRefresh:
             if row_is_cancelled(by_flight[1]):
                 return LegRefresh(by_flight[0], cancelled=True)
             return LegRefresh(None, swapped=True)
-    return LegRefresh(None)
+    return LegRefresh(None, rerouted=rerouted)
 
 
 # ---------------------------------------------------------------------------

@@ -76,7 +76,10 @@ def _leg_detail(event: FlightEvent) -> str:
     if event.status == EventState.CANCELLED:
         return "cancelled"
     if event.status == EventState.SWAPPED:
-        return "aircraft swapped off this flight"
+        # The state machinery writes a precise reason ("now flown by another
+        # aircraft", "flight no longer serves OAK", "aircraft now operating
+        # AS1603") — show it rather than flattening every case to "swapped".
+        return event.status_note or "aircraft swapped off this flight"
     if event.status == EventState.LOST:
         return f"tracking lost{f' ({event.status_note})' if event.status_note else ''}"
     if event.status == EventState.TURNAROUND_DELAY:

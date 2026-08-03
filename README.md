@@ -315,7 +315,7 @@ Updated 7:57 PM PDT
 | 🛫 | Departed | Climbed through 10,000 ft or left 15 NM (or concluded after going dark airborne) |
 | ↪️ | Diverted | Confirmed on the ground 30+ NM away — names the nearest airport |
 | ❌ | Cancelled | The airline cancelled the flight (caught by the hourly sync) |
-| 🔀 | Swapped / withdrawn | The source no longer lists this leg for this aircraft |
+| 🔀 | Swapped / withdrawn | The leg is no longer this aircraft's to fly — the line says why: `now flown by another aircraft`, `flight no longer serves OAK` (number rerouted), or `aircraft now operating AS1603` (renumbered) |
 | ⚠️ | Lost | Never appeared on ADS-B by 3 h past its time, and the source offered no explanation — then re-checked against the source afterwards |
 
 Every ✅/🛫/↪️/⚠️ conclusion is verified against the source ~25 minutes later:

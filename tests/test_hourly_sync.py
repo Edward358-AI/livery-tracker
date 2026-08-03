@@ -107,6 +107,20 @@ def test_sync_withdraws_a_leg_the_source_no_longer_lists(monkeypatch):
     assert counts["withdrawn"] == 1
 
 
+def test_sync_labels_a_reroute_honestly(monkeypatch):
+    """WN1050 wasn't swapped — the number moved to another route. The digest
+    should say that, not blame an aircraft change."""
+    leg = pending_leg()
+    app, store = app_with(leg)
+
+    run_sync(app, monkeypatch, rows=[],
+             refresh=lambda reg, ev: LegRefresh(None, rerouted=True))
+
+    survivor = store.get("arr")
+    assert survivor.status == EventState.SWAPPED
+    assert survivor.status_note == "flight no longer serves SFO"
+
+
 def test_sync_labels_a_confirmed_swap(monkeypatch):
     leg = pending_leg()
     app, store = app_with(leg)

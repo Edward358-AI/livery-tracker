@@ -115,6 +115,8 @@ def test_normal_delay_still_proceeds_to_live_tracking():
 
 
 def test_digest_explains_a_swapped_leg():
+    """The 🔀 line shows the precise reason when one was recorded, and the
+    generic label only as a fallback."""
     store = FlightStore()
     event = ghost_leg()
     event.status = EventState.SWAPPED
@@ -123,8 +125,13 @@ def test_digest_explains_a_swapped_leg():
 
     text = render_digest(store, make_config())
     assert "🔀" in text
-    assert "aircraft swapped off this flight" in text
+    assert "now flown by another aircraft" in text
     assert "delayed" not in text
+
+    event.status_note = ""
+    store.upsert(event)
+    text = render_digest(store, make_config())
+    assert "aircraft swapped off this flight" in text
 
 
 def test_swap_is_recorded_in_history(tmp_path):
