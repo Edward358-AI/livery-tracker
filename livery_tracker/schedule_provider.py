@@ -240,6 +240,8 @@ def rows_to_events(
         for ev_type, target_iata, when in legs:
             if when is None or not _within_harvest_window(row, ev_type, when, now):
                 continue
+            gate_side = "destination" if ev_type == EventType.ARRIVAL else "origin"
+            info = ((airport.get(gate_side) or {}).get("info")) or {}
             events.append(
                 FlightEvent(
                     id=FlightEvent.make_id(reg, ev_type, when, target_iata),
@@ -258,6 +260,8 @@ def rows_to_events(
                         EventState.CANCELLED if row_is_cancelled(row)
                         else EventState.WAITING_2H
                     ),
+                    terminal=str(info.get("terminal") or "").strip(),
+                    gate=str(info.get("gate") or "").strip(),
                 )
             )
     return events
@@ -452,6 +456,22 @@ class LegRefresh:
     #                           a renumbered movement
     rerouted: bool = False    # the flight number still flies, but its route no
     #                           longer touches this leg's watched airport
+    terminal: str = ""        # gate/terminal at the leg's watched airport, as
+    gate: str = ""            # currently published; empty when the source is silent
+
+
+def _row_gate_info(row: dict[str, Any], event: FlightEvent) -> tuple[str, str]:
+    """(terminal, gate) at the leg's watched airport, or empty strings.
+
+    Departures care about the origin's info block, arrivals the destination's
+    — always the watched side, since that is where the spotter stands.
+    """
+    side = "destination" if event.type == EventType.ARRIVAL else "origin"
+    info = (((row.get("airport") or {}).get(side)) or {}).get("info") or {}
+    return (
+        str(info.get("terminal") or "").strip(),
+        str(info.get("gate") or "").strip(),
+    )
 
 
 def _row_completed(row: dict[str, Any], key: str) -> tuple[bool, datetime | None]:
@@ -583,10 +603,12 @@ def refresh_leg_time(reg: str, event: FlightEvent) -> LegRefresh:
         if scheduled and estimated:
             delay = round((estimated - scheduled).total_seconds() / 60)
         completed, real_time = _row_completed(best[1], key)
+        terminal, gate = _row_gate_info(best[1], event)
         return LegRefresh(
             best[0], cancelled=row_is_cancelled(best[1]), delay_minutes=delay,
             completed=completed, real_time=real_time,
             matched_number=_row_flight_number(best[1]),
+            terminal=terminal, gate=gate,
         )
 
     # Our aircraft no longer lists this flight. Ask about the flight itself:

@@ -137,6 +137,7 @@ def _journal_evidence(
             "real_time": refresh.real_time.isoformat() if refresh.real_time else None,
             "matched_number": refresh.matched_number,
             "rerouted": refresh.rerouted,
+            "gate": f"{refresh.terminal} {refresh.gate}".strip(),
         }
     return evidence
 
@@ -421,6 +422,10 @@ def _apply_schedule(event: FlightEvent, result: schedule_provider.LegRefresh) ->
     if result.new_time is None:
         return
     event.scheduled_time = result.new_time
+    # Gates mirror exactly like times: adopt what the source publishes now,
+    # clear when it goes silent. Display-only, so a wrong gate costs nothing.
+    event.terminal = result.terminal
+    event.gate = result.gate
     delay = result.delay_minutes
     if delay is None:
         return
@@ -1086,6 +1091,7 @@ def _register_new_events(
                 existing.status = EventState.WAITING_2H
                 existing.status_note = ""
                 existing.scheduled_time = event.scheduled_time
+                existing.terminal, existing.gate = event.terminal, event.gate
                 store.upsert(existing)
                 schedule_event_jobs(application, existing)
                 created.append(existing)
@@ -1102,11 +1108,18 @@ def _register_new_events(
             # here would leave that note, which only the sync recomputes,
             # quietly disagreeing with it.
             drift = (event.scheduled_time - existing.scheduled_time).total_seconds()
+            gate_moved = _syncable(existing) and (event.terminal or event.gate) and (
+                (existing.terminal, existing.gate) != (event.terminal, event.gate)
+            )
+            if gate_moved:
+                existing.terminal, existing.gate = event.terminal, event.gate
             if _syncable(existing) and abs(drift) >= 60:
                 existing.scheduled_time = event.scheduled_time
                 store.upsert(existing)
                 if existing.status in (EventState.WAITING_2H, EventState.WAITING_LIVE):
                     schedule_event_jobs(application, existing)
+            elif gate_moved:
+                store.upsert(existing)
             continue
         store.upsert(event)
         schedule_event_jobs(application, event)
@@ -1597,9 +1610,10 @@ async def _run_sync_locked(
                 counts["updated"] += 1
                 changed = True
                 continue
-            # Present and running: mirror the source's time and delay figure.
+            # Present and running: mirror the source's time, delay and gate.
             set_journal_context(f"{sync_tag}.adopt", _journal_evidence(refresh=refresh))
             old_time, old_note = leg.scheduled_time, leg.status_note
+            old_gate = (leg.terminal, leg.gate)
             if leg.status_note == UNVERIFIED_NOTE:
                 leg.status_note = ""
             _apply_schedule(leg, refresh)
@@ -1610,7 +1624,11 @@ async def _run_sync_locked(
                 # The delay pushed the leg back out of its live window: hand
                 # it back to the mirror until T-1h comes around again.
                 leg.status = EventState.WAITING_LIVE
-            if leg.scheduled_time != old_time or leg.status_note != old_note:
+            if (
+                leg.scheduled_time != old_time
+                or leg.status_note != old_note
+                or (leg.terminal, leg.gate) != old_gate
+            ):
                 store.upsert(leg)
                 if leg.scheduled_time != old_time and leg.status in (
                     EventState.WAITING_2H, EventState.WAITING_LIVE

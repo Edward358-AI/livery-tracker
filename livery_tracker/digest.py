@@ -48,6 +48,16 @@ def fmt_local(when: datetime) -> str:
     return f"{day}{local.strftime('%I:%M %p').lstrip('0')} {tz}".strip()
 
 
+def _gate_suffix(event: FlightEvent) -> str:
+    """' · T2 D15' when the source publishes gate/terminal, '' otherwise."""
+    terminal = event.terminal
+    label = " ".join(
+        part for part in (f"T{terminal}" if terminal.isdigit() else terminal, event.gate)
+        if part
+    )
+    return f" · {label}" if label else ""
+
+
 def _leg_detail(event: FlightEvent) -> str:
     """The status phrase for one leg ('ETA 3:45 PM PDT', '12,400 ft · ...', ...)."""
     when_label = "ETA" if event.type == EventType.ARRIVAL else "ETD"
@@ -62,7 +72,7 @@ def _leg_detail(event: FlightEvent) -> str:
             bits.append(f"{tele['dist_nm']:.0f} NM {'out' if event.type == EventType.ARRIVAL else 'away'}")
         # The expected time stays on the line even once telemetry is flowing:
         # "48 NM out" alone never says whether that is early, late, or on time.
-        detail = f"{when_label} {fmt_local(event.scheduled_time)} — "
+        detail = f"{when_label} {fmt_local(event.scheduled_time)}{_gate_suffix(event)} — "
         detail += " · ".join(bits) if bits else "polling, no ADS-B contact yet"
         if event.status_note:
             detail += f" ({event.status_note})"
@@ -84,7 +94,7 @@ def _leg_detail(event: FlightEvent) -> str:
         return f"tracking lost{f' ({event.status_note})' if event.status_note else ''}"
     if event.status == EventState.TURNAROUND_DELAY:
         return event.status_note or "Awaiting turnaround / source conflict"
-    detail = f"{when_label} {fmt_local(event.scheduled_time)}"
+    detail = f"{when_label} {fmt_local(event.scheduled_time)}{_gate_suffix(event)}"
     if event.status == EventState.WAITING_LIVE and event.status_note:
         detail += f" ({event.status_note})"
     return detail

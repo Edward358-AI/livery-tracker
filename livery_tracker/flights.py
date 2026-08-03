@@ -67,6 +67,11 @@ class FlightEvent:
     flight_number: str = ""
     status: EventState = EventState.WAITING_2H
     status_note: str = ""
+    # Gate/terminal at the leg's watched airport, mirrored from the source
+    # like the times: adopted when published, cleared when it goes silent,
+    # never shown when empty. Display-only — no logic may depend on them.
+    terminal: str = ""
+    gate: str = ""
     last_telemetry: dict[str, Any] = field(
         default_factory=lambda: {"lat": None, "lon": None, "alt": None, "gs": None, "dist_nm": None}
     )
@@ -89,6 +94,8 @@ class FlightEvent:
             "flight_number": self.flight_number,
             "status": self.status.value,
             "status_note": self.status_note,
+            "terminal": self.terminal,
+            "gate": self.gate,
             "last_telemetry": self.last_telemetry,
         }
 
@@ -109,6 +116,8 @@ class FlightEvent:
             flight_number=raw.get("flight_number", ""),
             status=EventState(raw.get("status", "WAITING_2H")),
             status_note=raw.get("status_note", ""),
+            terminal=raw.get("terminal", ""),
+            gate=raw.get("gate", ""),
             last_telemetry=raw.get(
                 "last_telemetry",
                 {"lat": None, "lon": None, "alt": None, "gs": None, "dist_nm": None},
@@ -209,12 +218,17 @@ class FlightStore:
 
     def __init__(self) -> None:
         self.events: dict[str, FlightEvent] = {}
-        self._snapshots: dict[str, tuple[str, str, str]] = {}
+        self._snapshots: dict[str, tuple[str, str, str, str]] = {}
         self.reload()
 
     @staticmethod
-    def _snapshot(event: FlightEvent) -> tuple[str, str, str]:
-        return (event.status.value, event.scheduled_time.isoformat(), event.status_note)
+    def _snapshot(event: FlightEvent) -> tuple[str, str, str, str]:
+        return (
+            event.status.value,
+            event.scheduled_time.isoformat(),
+            event.status_note,
+            f"{event.terminal}|{event.gate}",
+        )
 
     def reload(self) -> None:
         path = flights_file()
@@ -241,6 +255,9 @@ class FlightStore:
                 change["time"] = [old[1], new[1]]
             if old[2] != new[2]:
                 change["note"] = [old[2], new[2]]
+            if old[3] != new[3]:
+                change["gate"] = [old[3].replace("|", " ").strip(),
+                                  new[3].replace("|", " ").strip()]
             # A late-running LIVE leg recomputes its lateness note every
             # poll; journaling each tick would bury the real transitions.
             if not (set(change) == {"note"} and event.status == EventState.LIVE):
