@@ -383,6 +383,10 @@ a real departure at one end and a real arrival at the other.
   parked in view or dark alike — also re-checks the source every few minutes, so a
   late-published delay or cancellation is caught even mid-live-tracking, and a
   delay that leaves the live window stands polling down until the new T-1h.
+- A live **arrival** still far out mirrors the source's ETA continuously — late,
+  early, or drifting — so a long-haul running 30 minutes ahead shows `(early 31m)`
+  with its ETA walking earlier as the flight gains. Delay/early figures always
+  decode as: displayed time ± note = the airline's currently filed schedule.
 - `unverified — source unreachable` — the last sync could not reach the source;
   the leg is kept, flagged, and re-verified next pass.
 - `(confirmed by source)` / `(source disagrees)` — what the ~25-minute
@@ -447,6 +451,18 @@ a real departure at one end and a real arrival at the other.
   T-1h still reaches the digest (and a big one hands the leg back to waiting).
   On top of the hourly floor, a **15-minute hot pass** covers just the tails with a
   leg due within 2 hours, so a late cancellation or swap can't hide in the gap.
+- **What the source killed, the source can revive**: a leg withdrawn as swapped
+  (or cancelled) comes back as a normal 🟡 pending leg the moment the source lists
+  that flight for the tail again — swap-backs are as routine as swaps. Conclusions
+  the tracker directly observed are never revived; those are `/dropflight`'s to
+  undo.
+- **Flight identity is checked, not assumed**: a number match must still serve the
+  watched airport (airlines reuse numbers across routes day to day — a number that
+  moved elsewhere withdraws as `flight no longer serves OAK`, not as a fake swap),
+  and a renumbered movement (same tail, route and time under a new number) is
+  recognised as one flight — the stale copy withdraws as `aircraft now operating
+  AS1603` instead of both numbers showing side by side. A flight already cancelled
+  when first discovered appears directly as ❌.
 - **Completed-awareness**: whenever the tracker consults the source about a leg it
   can't observe (a mismatched callsign, a held conflict, an aircraft that never
   appeared on ADS-B), it also reads whether the source records the flight as
