@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from datetime import datetime, timezone
 
 from telegram import Update
 from telegram.constants import ParseMode
-from telegram.ext import Application, CommandHandler, ContextTypes, filters
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 from . import __version__
 from . import aircraft as aircraft_db
@@ -52,6 +53,9 @@ HELP_TEXT = """<b>✈️ Livery Tracker Commands</b>
 /add &lt;tail&gt; — watch a registration (livery auto-resolved)
 /remove &lt;tail&gt; — stop watching
 /watchlist — show watched aircraft
+/export — the watchlist as plain registrations, one per line
+Send a .txt file (one registration per line) to bulk-import — one short
+verdict per tail; unresolvable entries are skipped
 /info &lt;tail&gt; — full dossier: aircraft details, live position, schedule
 /dropflight &lt;tail&gt; &lt;flight&gt; — remove one stale flight assignment
 
@@ -263,6 +267,188 @@ async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.application.create_task(
         _background_harvest(context.application, update.effective_chat.id, tail=tail)
     )
+
+
+# ---------------------------------------------------------------------------
+# Bulk import: send the command bot a .txt of registrations, one per line.
+# Processed sequentially with generous spacing (each tail costs ~4-5 requests
+# across the free sources), one short verdict line per tail, summary at the
+# end. Unresolvable registrations are skipped — bulk lists carry typos, and
+# watchlist slots are capped.
+# ---------------------------------------------------------------------------
+
+IMPORT_SPACING_S = 10
+IMPORT_MAX_ENTRIES = 300
+IMPORT_MAX_FILE_BYTES = 64 * 1024
+_REG_RE = re.compile(r"^[A-Z0-9-]{2,10}$")
+
+_import_running = False
+
+
+def _parse_import_lines(text: str) -> tuple[list[str], int]:
+    """(unique plausible registrations in file order, ignored-line count).
+
+    Blank lines and '#' comments are free; anything that can't be a
+    registration counts as ignored rather than producing per-line noise.
+    """
+    regs: list[str] = []
+    seen: set[str] = set()
+    ignored = 0
+    for line in text.splitlines():
+        entry = line.strip().upper()
+        if not entry or entry.startswith("#"):
+            continue
+        if not _REG_RE.match(entry):
+            ignored += 1
+            continue
+        if entry not in seen:
+            seen.add(entry)
+            regs.append(entry)
+    return regs, ignored
+
+
+def _import_resolved(info: dict) -> bool:
+    """Whether resolution found any evidence this registration exists."""
+    airline = (info.get("airline") or "").strip()
+    model = (info.get("model") or "").strip()
+    return bool(
+        (airline and airline != "Unknown airline")
+        or (model and model != "Unknown type")
+        or info.get("thumbnail")
+    )
+
+
+def _import_desc(info: dict) -> str:
+    """'B38M, Alaska Airlines, \"Livery\"' — compact, code preferred."""
+    bits = [
+        (info.get("type_code") or "").strip() or (info.get("model") or "").strip(),
+        (info.get("airline") or "").strip(),
+    ]
+    if info.get("livery"):
+        bits.append(f'"{info["livery"]}"')
+    return ", ".join(bit for bit in bits if bit and not bit.startswith("Unknown"))
+
+
+async def _background_import(application, chat_id: int, regs: list[str]) -> None:
+    global _import_running
+    config: Config = application.bot_data["config"]
+    added = already = unresolved = 0
+    try:
+        for index, tail in enumerate(regs):
+            if index:
+                await asyncio.sleep(IMPORT_SPACING_S)
+            if tail in config.watchlist:
+                already += 1
+                await application.bot.send_message(
+                    chat_id, f"➖ {tail} is already on the watchlist."
+                )
+                continue
+            if len(config.watchlist) >= MAX_WATCHLIST:
+                await application.bot.send_message(
+                    chat_id,
+                    f"🛑 The watchlist is full ({MAX_WATCHLIST}) — "
+                    f"{len(regs) - index} registration(s) not imported.",
+                )
+                break
+            info = await asyncio.to_thread(resolve_aircraft, tail)
+            if not _import_resolved(info):
+                unresolved += 1
+                await application.bot.send_message(
+                    chat_id, f"❌ Could not resolve {tail} — not added."
+                )
+                continue
+            config.watchlist[tail] = {
+                "airline": info["airline"],
+                "model": info["model"],
+                "livery": info["livery"],
+                "thumbnail": info["thumbnail"],
+                "added_at": datetime.now(timezone.utc).isoformat(),
+            }
+            config.save()
+            aircraft_db.record_profile(tail, info)
+            added += 1
+            new_legs, sources_ok = await tracker.harvest_single(application, tail)
+            desc = _import_desc(info)
+            line = f"✅ Now watching {tail}" + (f" ({desc})." if desc else ".")
+            if not sources_ok:
+                line += " Schedule sources unreachable — the next sync will pick it up."
+            elif new_legs:
+                line += f" {len(new_legs)} leg(s) found — check the digest!"
+            else:
+                line += " No flights at your airports in the next 24h."
+            await application.bot.send_message(chat_id, line)
+        await application.bot.send_message(
+            chat_id,
+            f"📦 Import finished: {added} added, {already} already watched, "
+            f"{unresolved} unresolved.",
+        )
+    except Exception:  # noqa: BLE001
+        log.exception("Bulk import failed")
+        try:
+            await application.bot.send_message(
+                chat_id, "⚠️ Import stopped by an error — check logs."
+            )
+        except Exception:  # noqa: BLE001
+            pass
+    finally:
+        _import_running = False
+
+
+async def handle_import_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """A .txt document sent to the command bot is a bulk-import request."""
+    global _import_running
+    document = update.message.document
+    name = (document.file_name or "").lower()
+    if not (name.endswith(".txt") or (document.mime_type or "") == "text/plain"):
+        await _reply_parts(
+            update.message,
+            "📎 To bulk-import, send a .txt file with one registration per line.",
+        )
+        return
+    if document.file_size and document.file_size > IMPORT_MAX_FILE_BYTES:
+        await _reply_parts(update.message, "📎 That file is too large for an import.")
+        return
+    if _import_running:
+        await _reply_parts(update.message, "⏳ An import is already running — wait for it to finish.")
+        return
+
+    tg_file = await document.get_file()
+    payload = bytes(await tg_file.download_as_bytearray())
+    regs, ignored = _parse_import_lines(payload.decode("utf-8", errors="replace"))
+    if not regs:
+        await _reply_parts(update.message, "📎 No registrations found in that file.")
+        return
+    if len(regs) > IMPORT_MAX_ENTRIES:
+        await _reply_parts(
+            update.message,
+            f"📎 That's {len(regs)} registrations — the limit per import is "
+            f"{IMPORT_MAX_ENTRIES}. Split the file and send again.",
+        )
+        return
+
+    minutes = max(1, round(len(regs) * IMPORT_SPACING_S / 60))
+    note = f" ({ignored} line(s) ignored)" if ignored else ""
+    await _reply_parts(
+        update.message,
+        f"📥 Importing {len(regs)} registration(s){note} — one every ~{IMPORT_SPACING_S}s, "
+        f"about {minutes} min. One short update per tail follows.",
+    )
+    _import_running = True
+    context.application.create_task(
+        _background_import(context.application, update.effective_chat.id, regs)
+    )
+
+
+async def cmd_export(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """The watchlist as plain registrations, one per line — import-ready."""
+    config = _config(context)
+    if not config.watchlist:
+        await _reply_parts(update.message, "The watchlist is empty.")
+        return
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    lines = [f"# {len(config.watchlist)} registrations exported {stamp}"]
+    lines.extend(sorted(config.watchlist))
+    await _reply_parts(update.message, "\n".join(lines))
 
 
 async def cmd_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -598,5 +784,10 @@ def register_handlers(application: Application, chat_id: int) -> None:
         ("rebuild", cmd_rebuild),
         ("version", cmd_version),
         ("update", cmd_update),
+        ("export", cmd_export),
     ]:
         application.add_handler(CommandHandler(command, handler, filters=owner))
+    # A document sent by the owner is a bulk-import request (.txt of tails).
+    application.add_handler(
+        MessageHandler(owner & filters.Document.ALL, handle_import_document)
+    )

@@ -22,6 +22,7 @@ BOT_COMMANDS = [
     BotCommand("info", "Full dossier for a registration"),
     BotCommand("remove", "Stop watching a tail"),
     BotCommand("watchlist", "Show watched aircraft"),
+    BotCommand("export", "Watchlist as plain text (import-ready)"),
     BotCommand("airports", "Show target airports"),
     BotCommand("addairport", "Add a target airport"),
     BotCommand("rmairport", "Remove a target airport"),

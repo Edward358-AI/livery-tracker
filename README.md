@@ -187,6 +187,8 @@ On first run you'll be asked for:
 | `/remove <tail>` | Stop watching (pending legs drop out of the digest) |
 | `/dropflight <tail> <flight>` | Remove a stale flight assignment for one aircraft without unwatching it |
 | `/watchlist` | Show watched aircraft |
+| `/export` | The watchlist as plain registrations, one per line — paste-ready for sharing, and exactly the format the bulk import accepts |
+| *(send a `.txt` file)* | **Bulk import**: one registration per line (`#` comments and blanks ignored). Imported one tail every ~10 s with a short verdict per tail — `✅ Now watching N102 (B38M, ABC Airlines). 2 leg(s) found — check the digest!` — and a summary at the end. Unresolvable entries are skipped (bulk lists carry typos; slots are capped at 256), duplicates are noted, and the run stops cleanly at the cap |
 | `/addairport <code>` | Add a target airport by IATA/ICAO code — triggers a full re-harvest |
 | `/rmairport <code>` | Remove a target airport (its legs drop out of the digest) |
 | `/airports` | List target airports |
@@ -208,6 +210,8 @@ On first run you'll be asked for:
 **What each config change triggers:**
 
 - `/add <tail>` — a targeted harvest of just that tail; its legs appear within seconds.
+- **Bulk import (.txt)** — the same targeted harvest per tail, paced ~10 s apart so a
+  100-tail list spreads over ~17 minutes instead of bursting the sources.
 - `/addairport <code>` — a **full re-harvest**, because a new airport changes what every
   watched tail's schedule means (legs previously filtered out now match).
 - `/rmairport <code>` — no harvest: every leg targeting that airport is purged
