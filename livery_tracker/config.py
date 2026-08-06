@@ -112,7 +112,7 @@ class Config:
 
     target_airports: dict[str, dict[str, Any]] = field(default_factory=dict)
     watchlist: dict[str, dict[str, Any]] = field(default_factory=dict)
-    digest_group_by: str = "type"  # how the digest sections flights: type|airport|airline
+    digest_group_by: str = "airport"  # how the digest sections flights: airport|airline|type
 
     @classmethod
     def load(cls) -> "Config":
@@ -123,7 +123,7 @@ class Config:
         return cls(
             target_airports=raw.get("target_airports", {}),
             watchlist=raw.get("watchlist", {}),
-            digest_group_by=raw.get("digest_group_by", "type"),
+            digest_group_by=raw.get("digest_group_by", "airport"),
         )
 
     def save(self) -> None:

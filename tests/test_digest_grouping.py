@@ -1,15 +1,15 @@
-"""Digest grouping modes: type (default), airport, airline."""
+"""Digest grouping modes: airport (default), airline-per-airport, flat type."""
 
 from datetime import datetime, timedelta, timezone
 
 from livery_tracker.config import Config
-from livery_tracker.digest import GROUP_MODES, render_digest
+from livery_tracker.digest import DEFAULT_GROUP_MODE, GROUP_MODES, render_digest
 from livery_tracker.flights import EventState, EventType, FlightEvent, FlightStore
 
 BASE = datetime(2026, 7, 27, 16, 0, tzinfo=timezone.utc)
 
 
-def make_config(group_by: str = "type") -> Config:
+def make_config(group_by: str = DEFAULT_GROUP_MODE) -> Config:
     config = Config(digest_group_by=group_by)
     config.target_airports = {
         "SFO": {"icao": "KSFO", "name": "San Francisco", "lat": 37.6, "lon": -122.4},
@@ -43,7 +43,7 @@ def populated_store() -> FlightStore:
     store = FlightStore()
     store.upsert(leg("N265AK", EventType.ARRIVAL, "SFO", "SEA", "SFO", "AS1234", 60))
     store.upsert(leg("N8658A", EventType.DEPARTURE, "SJC", "SJC", "LAS", "WN400", 30))
-    # Same flight, both endpoints watched -> a mergeable pair.
+    # Same flight, both endpoints watched -> mergeable in the flat type view.
     store.upsert(leg("N642FR", EventType.DEPARTURE, "SFO", "SFO", "SJC", "F9100", 10))
     store.upsert(leg("N642FR", EventType.ARRIVAL, "SJC", "SFO", "SJC", "F9100", 50))
     return store
@@ -57,20 +57,18 @@ def sections_of(text: str) -> list[str]:
     ]
 
 
-# -- default: by type ----------------------------------------------------------
-
-def test_group_by_type_merges_and_splits_arrivals_departures():
-    text = render_digest(populated_store(), make_config("type"))
-    assert sections_of(text) == [
-        "🔁 <b>Between your airports</b>",
-        "🛬 <b>Arrivals</b>",
-        "🛫 <b>Departures</b>",
-    ]
-    assert "N642FR" in text and text.count("N642FR") == 1  # merged into one line
-    assert "@ SFO" in text  # airport shown inline in this mode
+def subheaders_of(block: str) -> list[str]:
+    """Italic sub-header lines inside one airport section, in order."""
+    return [line for line in block.splitlines() if "<i>" in line and line[0] in "🛬🛫🏢"]
 
 
-# -- by airport ----------------------------------------------------------------
+# -- default: by airport --------------------------------------------------------
+
+def test_default_mode_is_airport():
+    assert DEFAULT_GROUP_MODE == "airport"
+    assert Config().digest_group_by == "airport"
+    assert next(iter(GROUP_MODES)) == "airport"  # listed first in /view
+
 
 def test_group_by_airport_sections_every_airport_with_all_traffic():
     text = render_digest(populated_store(), make_config("airport"))
@@ -88,10 +86,31 @@ def test_group_by_airport_sections_every_airport_with_all_traffic():
     assert "@ SFO" not in text and "@ SJC" not in text
 
 
-def test_group_by_airport_orders_legs_by_time():
+def test_group_by_airport_splits_arrivals_and_departures():
     text = render_digest(populated_store(), make_config("airport"))
+    sfo, sjc = text.split("🛬🛫 <b>SJC</b>")
+    assert subheaders_of(sfo) == ["🛬 <i>Arrivals</i>", "🛫 <i>Departures</i>"]
+    assert subheaders_of(sjc) == ["🛬 <i>Arrivals</i>", "🛫 <i>Departures</i>"]
+    # Arrivals block first: the SFO arrival precedes the SFO departure even
+    # though the departure is scheduled 50 minutes earlier.
+    assert sfo.index("N265AK") < sfo.index("N642FR")
+
+
+def test_group_by_airport_omits_an_empty_direction():
+    store = FlightStore()
+    store.upsert(leg("N265AK", EventType.ARRIVAL, "SFO", "SEA", "SFO", "AS1234", 60))
+    text = render_digest(store, make_config("airport"))
+    assert "🛬 <i>Arrivals</i>" in text
+    assert "🛫 <i>Departures</i>" not in text  # nothing departing -> no header
+
+
+def test_group_by_airport_orders_legs_by_time_within_a_direction():
+    store = populated_store()
+    store.upsert(leg("N8658A", EventType.ARRIVAL, "SFO", "LAS", "SFO", "WN401", 20))
+    text = render_digest(store, make_config("airport"))
     sfo_block = text.split("🛬🛫 <b>SJC</b>")[0]
-    assert sfo_block.index("N642FR") < sfo_block.index("N265AK")  # +10m before +60m
+    arrivals = sfo_block.split("🛫 <i>Departures</i>")[0]
+    assert arrivals.index("WN401") < arrivals.index("AS1234")  # +20m before +60m
 
 
 def test_group_by_airport_keeps_legs_from_removed_airports():
@@ -102,23 +121,39 @@ def test_group_by_airport_keeps_legs_from_removed_airports():
     assert "🛬🛫 <b>SJC</b>" in text  # still grouped, just without a name
 
 
-# -- by airline ----------------------------------------------------------------
+# -- by airline (within each airport) -------------------------------------------
 
-def test_group_by_airline_sections_each_carrier():
+def test_group_by_airline_nests_carriers_under_each_airport():
     text = render_digest(populated_store(), make_config("airline"))
     assert sections_of(text) == [
-        "🏢 <b>Alaska Airlines</b>",
-        "🏢 <b>Frontier</b>",
-        "🏢 <b>Southwest Airlines</b>",
+        "🛬🛫 <b>SFO</b> — San Francisco",
+        "🛬🛫 <b>SJC</b> — San Jose",
     ]
-    assert text.count("N642FR") == 1  # merged, like the default mode
+    sfo, sjc = text.split("🛬🛫 <b>SJC</b>")
+    assert subheaders_of(sfo) == ["🏢 <i>Alaska Airlines</i>", "🏢 <i>Frontier</i>"]
+    assert subheaders_of(sjc) == ["🏢 <i>Frontier</i>", "🏢 <i>Southwest Airlines</i>"]
+    # Per-airport views never merge: the hop shows at both ends.
+    assert text.count("N642FR") == 2
 
 
 def test_group_by_airline_falls_back_for_unknown_tails():
     store = FlightStore()
     store.upsert(leg("N999ZZ", EventType.ARRIVAL, "SFO", "LAX", "SFO", "XX1", 15))
     text = render_digest(store, make_config("airline"))  # tail not in watchlist
-    assert "🏢 <b>Unknown airline</b>" in text
+    assert "🏢 <i>Unknown airline</i>" in text
+
+
+# -- flat type view -------------------------------------------------------------
+
+def test_group_by_type_merges_and_splits_arrivals_departures():
+    text = render_digest(populated_store(), make_config("type"))
+    assert sections_of(text) == [
+        "🔁 <b>Between your airports</b>",
+        "🛬 <b>Arrivals</b>",
+        "🛫 <b>Departures</b>",
+    ]
+    assert "N642FR" in text and text.count("N642FR") == 1  # merged into one line
+    assert "@ SFO" in text  # airport shown inline in this mode
 
 
 # -- shared behaviour ----------------------------------------------------------
@@ -132,9 +167,9 @@ def test_every_mode_renders_header_footer_and_all_tails():
             assert tail in text, f"{tail} missing in {mode} mode"
 
 
-def test_unknown_mode_falls_back_to_type():
+def test_unknown_mode_falls_back_to_the_default():
     text = render_digest(populated_store(), make_config("nonsense"))
-    assert "🛬 <b>Arrivals</b>" in text
+    assert "🛬🛫 <b>SFO</b>" in text  # airport view, the default
 
 
 def test_empty_digest_in_every_mode():
@@ -144,17 +179,17 @@ def test_empty_digest_in_every_mode():
 
 
 def test_group_mode_persists_across_reload():
-    config = make_config("airline")
-    config.save()
-    assert Config.load().digest_group_by == "airline"
-
-
-def test_legacy_config_without_mode_defaults_to_type():
     config = make_config("type")
+    config.save()
+    assert Config.load().digest_group_by == "type"
+
+
+def test_legacy_config_without_mode_gets_the_default():
+    config = make_config("airport")
     config.save()
     path = __import__("livery_tracker.config", fromlist=["config_file"]).config_file()
     import json
     raw = json.loads(path.read_text(encoding="utf-8"))
     del raw["digest_group_by"]  # config written before this feature existed
     path.write_text(json.dumps(raw), encoding="utf-8")
-    assert Config.load().digest_group_by == "type"
+    assert Config.load().digest_group_by == "airport"

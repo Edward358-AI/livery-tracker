@@ -195,7 +195,7 @@ On first run you'll be asked for:
 | `/refresh` | Re-run today's schedule harvest right now |
 | `/rebuild` | Last-resort recovery: re-derive today's schedule from the sources. Keeps your watchlist, airports, aircraft details **and every landing/departure/diversion the tracker directly observed** — a rebuild rebuilds the future, it doesn't rewrite the past (a wrong observed record is `/dropflight`'s job). Like `/dropflight`, deliberately not in the tap menu — type it. 10-min cooldown |
 | `/status` | Watchlist size, airports, digest layout, active flight legs |
-| `/view` | Show the digest layout; `/view type\|airport\|airline` changes it |
+| `/view` | Show the digest layout; `/view airport\|airline\|type` changes it (default: per-airport with arrivals/departures blocks) |
 | `/version` | Running version + whether a newer release exists |
 | `/update` | Install the latest release now and restart |
 
@@ -294,21 +294,23 @@ flakiest datum in aviation, so nothing in the tracking logic depends on them. If
 past what a single Telegram message can hold (~4096 characters, roughly 45
 legs), the digest automatically continues into additional messages — each still
 edited in place, so it never stops updating no matter how many aircraft you
-watch. Example:
+watch. Example (the default airport-first layout):
 
 ```
 ✈️ LIVERY DIGEST — Sun Jul 26
 Watching 5 aircraft at OAK, SFO, SJC
 
-🔁 Between your airports
-🚨 N265AK "West Coast Wonders" — SFO➔LAX AS1052, departed 9:04 AM PDT → ETA 10:31 AM PDT — 21,000 ft · 415 kts · 62 NM out
-
+🛬🛫 SFO — San Francisco International
 🛬 Arrivals
-🚨 N8658A — DEN➔SFO WN4670 @ SFO, ETA 1:02 PM PDT — 5,025 ft · 235 kts · 17 NM out
-🟡 N8658A — LAS➔SJC WN1242 @ SJC, ETA 1:45 PM PDT
+🚨 N8658A — DEN➔SFO WN4670, ETA 1:02 PM PDT — 5,025 ft · 235 kts · 17 NM out
 
 🛫 Departures
-🕒 N642FR "Hugh the Manatee" — SFO➔LAX F92858 @ SFO, ETD 8:36 PM PDT
+🚨 N265AK "West Coast Wonders" — SFO➔LAX AS1052, departed 9:04 AM PDT
+🕒 N642FR "Hugh the Manatee" — SFO➔LAX F92858, ETD 8:36 PM PDT
+
+🛬🛫 SJC — San Jose International
+🛬 Arrivals
+🟡 N8658A — LAS➔SJC WN1242, ETA 1:45 PM PDT
 
 Updated 7:57 PM PDT
 ```
@@ -336,33 +338,40 @@ signal, a presumed landing) adopt whatever the source can prove.
 The digest can group the day three ways. Whatever you pick sticks (it's saved in
 `config_and_watch.json`) and the digest is redrawn immediately.
 
-**`/view type`** — the default: arrivals and departures.
-
-- **🛬 Arrivals / 🛫 Departures** — legs touching one of your airports.
-- **🔁 Between your airports** — a flight connecting *two* watched airports is shown
-  as one merged line, `departure phase → arrival phase` (it's still two
-  independently tracked legs under the hood).
-
-**`/view airport`** — one section per airport, showing **all traffic in and out**
-of it in time order. Best when you care about "what's happening at SFO today".
-Two-airport flights deliberately appear under *both* airports here, since they're
-a real departure at one end and a real arrival at the other.
+**`/view airport`** — the default: one bold section per airport, and inside it
+an **🛬 Arrivals** block then a **🛫 Departures** block, each in time order (an
+empty block is omitted). Best when the question is "what's happening at SFO
+today". A flight connecting *two* watched airports deliberately appears under
+*both*, since it's a real departure at one end and a real arrival at the other.
 
 ```
 🛬🛫 SFO — San Francisco
-✅ N8658A — DEN➔SFO WN4670, landed 8:03 PM PDT
-🟡 N642FR "Hugh the Manatee" — SFO➔SJC F9100, ETD 11:43 PM PDT
+🛬 Arrivals
 🚨 N265AK "Xáat Kwáani" — SEA➔SFO AS1234, ETA 12:58 PM PDT — 12,400 ft · 310 kts · 48 NM out
+
+🛫 Departures
+🟡 N642FR "Hugh the Manatee" — SFO➔SJC F9100, ETD 11:43 PM PDT
 ```
 
-**`/view airline`** — one section per airline (resolved automatically when you
-`/add` a tail), each in time order. Best for fleet-watching a single carrier.
+**`/view airline`** — the same airport sections, but each one re-cut **by
+carrier** (resolved automatically when you `/add` a tail) instead of by
+direction, arrivals and departures interleaved in time order. Toggle it on when
+you're fleet-watching specific carriers at each field; `/view airport` toggles
+back.
 
 ```
+🛬🛫 SFO — San Francisco
 🏢 Alaska Airlines
-🚨 N265AK "Xáat Kwáani" — SEA➔SFO AS1234 @ SFO, ETA 12:58 PM PDT — 12,400 ft · 310 kts · 48 NM out
-🟡 N596AS "Tiana's Bayou Adventure" — SJC➔SEA AS1311 @ SJC, ETD Mon 1:03 AM PDT
+🚨 N265AK "Xáat Kwáani" — SEA➔SFO AS1234, ETA 12:58 PM PDT — 12,400 ft · 310 kts · 48 NM out
+🟡 N596AS "Tiana's Bayou Adventure" — SFO➔SEA AS1311, ETD Mon 1:03 AM PDT
 ```
+
+**`/view type`** — the flat legacy layout: every airport pooled into one
+**🛬 Arrivals** and one **🛫 Departures** list (each line carries `@ SFO` since
+the section no longer says), plus **🔁 Between your airports** — the one mode
+where a flight connecting two watched airports collapses into a single merged
+line, `departure phase → arrival phase` (still two independently tracked legs
+under the hood).
 
 ### Notes you may see on a leg
 

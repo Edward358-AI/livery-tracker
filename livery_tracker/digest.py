@@ -183,11 +183,11 @@ def _pair_legs(
 # ---------------------------------------------------------------------------
 
 GROUP_MODES = {
-    "type": "arrivals vs departures",
-    "airport": "all traffic per airport",
-    "airline": "one section per airline",
+    "airport": "each airport, arrivals then departures",
+    "airline": "each airport, grouped by airline",
+    "type": "flat arrivals vs departures, all airports pooled",
 }
-DEFAULT_GROUP_MODE = "type"
+DEFAULT_GROUP_MODE = "airport"
 
 Section = tuple[str, list[str]]
 
@@ -212,52 +212,74 @@ def _sections_by_type(events: list[FlightEvent], config: Config) -> list[Section
     return sections
 
 
-def _sections_by_airport(events: list[FlightEvent], config: Config) -> list[Section]:
-    """All traffic in and out of each airport, in time order.
+def _airport_buckets(
+    events: list[FlightEvent], config: Config
+) -> list[tuple[str, list[FlightEvent]]]:
+    """(section title, legs) per airport, airports in code order.
 
-    Legs are deliberately not merged here: a flight between two watched
-    airports is a real departure at one and a real arrival at the other, so
-    it belongs under both headings.
+    Legs are deliberately not merged in the per-airport views: a flight
+    between two watched airports is a real departure at one and a real
+    arrival at the other, so it belongs under both headings.
     """
     buckets: dict[str, list[FlightEvent]] = {}
     for event in events:
         buckets.setdefault(event.target_airport, []).append(event)
-
-    sections: list[Section] = []
+    out: list[tuple[str, list[FlightEvent]]] = []
     for code in sorted(buckets):
         name = (config.target_airports.get(code) or {}).get("name", "")
         title = f"🛬🛫 <b>{code}</b>" + (f" — {name}" if name else "")
-        legs = sorted(buckets[code], key=lambda e: e.scheduled_time)
-        sections.append((title, [format_leg(e, show_airport=False) for e in legs]))
+        out.append((title, buckets[code]))
+    return out
+
+
+def _sub_blocks(groups: list[tuple[str, list[FlightEvent]]]) -> list[str]:
+    """Sub-headed blocks inside one airport section, legs in time order.
+
+    Sub-headers are italic where section titles are bold, so the two levels
+    read differently at a glance; empty blocks are omitted entirely.
+    """
+    lines: list[str] = []
+    for label, legs in groups:
+        if not legs:
+            continue
+        if lines:
+            lines.append("")
+        lines.append(label)
+        lines.extend(
+            format_leg(e, show_airport=False)
+            for e in sorted(legs, key=lambda e: e.scheduled_time)
+        )
+    return lines
+
+
+def _sections_by_airport(events: list[FlightEvent], config: Config) -> list[Section]:
+    """Default: one section per airport, arrivals then departures inside it."""
+    sections: list[Section] = []
+    for title, legs in _airport_buckets(events, config):
+        sections.append((title, _sub_blocks([
+            ("🛬 <i>Arrivals</i>", [e for e in legs if e.type == EventType.ARRIVAL]),
+            ("🛫 <i>Departures</i>", [e for e in legs if e.type == EventType.DEPARTURE]),
+        ])))
     return sections
 
 
 def _sections_by_airline(events: list[FlightEvent], config: Config) -> list[Section]:
-    """One section per airline, each in time order."""
-    pairs, arrivals, departures = _pair_legs(events)
-    buckets: dict[str, list[tuple[datetime, str]]] = {}
-
-    def add(event: FlightEvent, line: str) -> None:
-        buckets.setdefault(_airline_of(event, config), []).append(
-            (event.scheduled_time, line)
-        )
-
-    for dep, arr in pairs:
-        add(dep, _merged_line(dep, arr))
-    for event in arrivals + departures:
-        add(event, format_leg(event))
-
+    """The airport view re-cut: each airport's legs grouped by carrier."""
     sections: list[Section] = []
-    for airline in sorted(buckets):
-        lines = [line for _, line in sorted(buckets[airline], key=lambda item: item[0])]
-        sections.append((f"🏢 <b>{airline}</b>", lines))
+    for title, legs in _airport_buckets(events, config):
+        carriers: dict[str, list[FlightEvent]] = {}
+        for event in legs:
+            carriers.setdefault(_airline_of(event, config), []).append(event)
+        sections.append((title, _sub_blocks(
+            [(f"🏢 <i>{airline}</i>", carriers[airline]) for airline in sorted(carriers)]
+        )))
     return sections
 
 
 _SECTION_BUILDERS = {
-    "type": _sections_by_type,
     "airport": _sections_by_airport,
     "airline": _sections_by_airline,
+    "type": _sections_by_type,
 }
 
 
@@ -276,7 +298,7 @@ def _digest_body(store: FlightStore, config: Config, now: datetime) -> list[Sect
     events = sorted(store.events.values(), key=lambda e: e.scheduled_time)
     if not events:
         return [("", ["No watched aircraft scheduled at your target airports today."])]
-    builder = _SECTION_BUILDERS.get(config.digest_group_by, _sections_by_type)
+    builder = _SECTION_BUILDERS.get(config.digest_group_by, _SECTION_BUILDERS[DEFAULT_GROUP_MODE])
     return builder(events, config)
 
 

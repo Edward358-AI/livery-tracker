@@ -27,7 +27,10 @@ def make_event(idx: str, ev_type: EventType, status: EventState, **overrides) ->
 
 
 def make_config() -> Config:
-    config = Config()
+    # Pinned to the flat type view: the leg-rendering assertions here are
+    # mode-agnostic, but the pairing/merging ones are about this layout.
+    # test_digest_grouping.py covers the airport-first default.
+    config = Config(digest_group_by="type")
     config.target_airports["SFO"] = {"icao": "KSFO", "name": "San Francisco", "lat": 37.6, "lon": -122.4}
     config.watchlist["N265AK"] = {"airline": "Alaska", "model": "B739", "livery": "More to Love"}
     return config
