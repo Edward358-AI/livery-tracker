@@ -130,8 +130,8 @@ def test_group_by_airline_nests_carriers_under_each_airport():
         "📍 <b>SJC</b> — San Jose",
     ]
     sfo, sjc = text.split("📍 <b>SJC</b>")
-    assert subheaders_of(sfo) == ["🏢 <i>Alaska Airlines</i>", "🏢 <i>Frontier</i>"]
-    assert subheaders_of(sjc) == ["🏢 <i>Frontier</i>", "🏢 <i>Southwest Airlines</i>"]
+    assert subheaders_of(sfo) == ["🏢 <i><u>Alaska Airlines</u></i>", "🏢 <i><u>Frontier</u></i>"]
+    assert subheaders_of(sjc) == ["🏢 <i><u>Frontier</u></i>", "🏢 <i><u>Southwest Airlines</u></i>"]
     # Per-airport views never merge: the hop shows at both ends.
     assert text.count("N642FR") == 2
 
@@ -140,7 +140,7 @@ def test_group_by_airline_falls_back_for_unknown_tails():
     store = FlightStore()
     store.upsert(leg("N999ZZ", EventType.ARRIVAL, "SFO", "LAX", "SFO", "XX1", 15))
     text = render_digest(store, make_config("airline"))  # tail not in watchlist
-    assert "🏢 <i>Unknown airline</i>" in text
+    assert "🏢 <i><u>Unknown airline</u></i>" in text
 
 
 # -- flat type view -------------------------------------------------------------

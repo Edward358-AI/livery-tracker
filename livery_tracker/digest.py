@@ -271,7 +271,7 @@ def _sections_by_airline(events: list[FlightEvent], config: Config) -> list[Sect
         for event in legs:
             carriers.setdefault(_airline_of(event, config), []).append(event)
         sections.append((title, _sub_blocks(
-            [(f"🏢 <i>{airline}</i>", carriers[airline]) for airline in sorted(carriers)]
+            [(f"🏢 <i><u>{airline}</u></i>", carriers[airline]) for airline in sorted(carriers)]
         )))
     return sections
 
