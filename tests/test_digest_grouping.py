@@ -156,6 +156,17 @@ def test_group_by_type_merges_and_splits_arrivals_departures():
     assert "@ SFO" in text  # airport shown inline in this mode
 
 
+def test_airports_get_a_wider_gap_than_sub_blocks():
+    text = render_digest(populated_store(), make_config("airport"))
+    # Two blank lines between airport sections...
+    assert "\n\n\n🛬🛫 <b>SJC</b>" in text
+    # ...one between the sub-blocks inside an airport...
+    assert "\n\n🛫 <i>Departures</i>" in text
+    assert "\n\n\n🛫 <i>Departures</i>" not in text
+    # ...and one before the footer.
+    assert "\n\n<i>Updated" in text and "\n\n\n<i>Updated" not in text
+
+
 # -- shared behaviour ----------------------------------------------------------
 
 def test_every_mode_renders_header_footer_and_all_tails():

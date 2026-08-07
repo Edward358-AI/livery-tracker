@@ -308,6 +308,7 @@ Watching 5 aircraft at OAK, SFO, SJC
 🚨 N265AK "West Coast Wonders" — SFO➔LAX AS1052, departed 9:04 AM PDT
 🕒 N642FR "Hugh the Manatee" — SFO➔LAX F92858, ETD 8:36 PM PDT
 
+
 🛬🛫 SJC — San Jose International
 🛬 Arrivals
 🟡 N8658A — LAS➔SJC WN1242, ETA 1:45 PM PDT

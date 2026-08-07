@@ -334,7 +334,11 @@ def render_digest_parts(
         if title:
             body.append(title)
         body.extend(section_lines)
-        body.append("")
+        # Two blank lines between sections: sub-blocks inside an airport are
+        # separated by one, so the airports themselves need a larger gap.
+        body.extend(("", ""))
+    if body:
+        body.pop()  # back to a single blank before the footer
 
     if limit is None:
         return ["\n".join(header + body + [footer])]
