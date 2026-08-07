@@ -53,7 +53,7 @@ def sections_of(text: str) -> list[str]:
     """Section header lines (bold titles), in order."""
     return [
         line for line in text.splitlines()
-        if line.startswith(("🔁", "🛬", "🛫", "🏢")) and "<b>" in line
+        if line.startswith(("🔁", "🛬", "🛫", "🏢", "📍")) and "<b>" in line
     ]
 
 
@@ -73,10 +73,10 @@ def test_default_mode_is_airport():
 def test_group_by_airport_sections_every_airport_with_all_traffic():
     text = render_digest(populated_store(), make_config("airport"))
     assert sections_of(text) == [
-        "🛬🛫 <b>SFO</b> — San Francisco",
-        "🛬🛫 <b>SJC</b> — San Jose",
+        "📍 <b>SFO</b> — San Francisco",
+        "📍 <b>SJC</b> — San Jose",
     ]
-    sfo, sjc = text.split("🛬🛫 <b>SJC</b>")
+    sfo, sjc = text.split("📍 <b>SJC</b>")
     # SFO carries an arrival and a departure; SJC likewise.
     assert "N265AK" in sfo and "N642FR" in sfo
     assert "N8658A" in sjc and "N642FR" in sjc
@@ -88,9 +88,9 @@ def test_group_by_airport_sections_every_airport_with_all_traffic():
 
 def test_group_by_airport_splits_arrivals_and_departures():
     text = render_digest(populated_store(), make_config("airport"))
-    sfo, sjc = text.split("🛬🛫 <b>SJC</b>")
-    assert subheaders_of(sfo) == ["🛬 <i>Arrivals</i>", "🛫 <i>Departures</i>"]
-    assert subheaders_of(sjc) == ["🛬 <i>Arrivals</i>", "🛫 <i>Departures</i>"]
+    sfo, sjc = text.split("📍 <b>SJC</b>")
+    assert subheaders_of(sfo) == ["🛬 <i><u>Arrivals</u></i>", "🛫 <i><u>Departures</u></i>"]
+    assert subheaders_of(sjc) == ["🛬 <i><u>Arrivals</u></i>", "🛫 <i><u>Departures</u></i>"]
     # Arrivals block first: the SFO arrival precedes the SFO departure even
     # though the departure is scheduled 50 minutes earlier.
     assert sfo.index("N265AK") < sfo.index("N642FR")
@@ -100,16 +100,16 @@ def test_group_by_airport_omits_an_empty_direction():
     store = FlightStore()
     store.upsert(leg("N265AK", EventType.ARRIVAL, "SFO", "SEA", "SFO", "AS1234", 60))
     text = render_digest(store, make_config("airport"))
-    assert "🛬 <i>Arrivals</i>" in text
-    assert "🛫 <i>Departures</i>" not in text  # nothing departing -> no header
+    assert "🛬 <i><u>Arrivals</u></i>" in text
+    assert "🛫 <i><u>Departures</u></i>" not in text  # nothing departing -> no header
 
 
 def test_group_by_airport_orders_legs_by_time_within_a_direction():
     store = populated_store()
     store.upsert(leg("N8658A", EventType.ARRIVAL, "SFO", "LAS", "SFO", "WN401", 20))
     text = render_digest(store, make_config("airport"))
-    sfo_block = text.split("🛬🛫 <b>SJC</b>")[0]
-    arrivals = sfo_block.split("🛫 <i>Departures</i>")[0]
+    sfo_block = text.split("📍 <b>SJC</b>")[0]
+    arrivals = sfo_block.split("🛫 <i><u>Departures</u></i>")[0]
     assert arrivals.index("WN401") < arrivals.index("AS1234")  # +20m before +60m
 
 
@@ -118,7 +118,7 @@ def test_group_by_airport_keeps_legs_from_removed_airports():
     config = make_config("airport")
     config.target_airports.pop("SJC")  # airport removed after harvest
     text = render_digest(store, config)
-    assert "🛬🛫 <b>SJC</b>" in text  # still grouped, just without a name
+    assert "📍 <b>SJC</b>" in text  # still grouped, just without a name
 
 
 # -- by airline (within each airport) -------------------------------------------
@@ -126,10 +126,10 @@ def test_group_by_airport_keeps_legs_from_removed_airports():
 def test_group_by_airline_nests_carriers_under_each_airport():
     text = render_digest(populated_store(), make_config("airline"))
     assert sections_of(text) == [
-        "🛬🛫 <b>SFO</b> — San Francisco",
-        "🛬🛫 <b>SJC</b> — San Jose",
+        "📍 <b>SFO</b> — San Francisco",
+        "📍 <b>SJC</b> — San Jose",
     ]
-    sfo, sjc = text.split("🛬🛫 <b>SJC</b>")
+    sfo, sjc = text.split("📍 <b>SJC</b>")
     assert subheaders_of(sfo) == ["🏢 <i>Alaska Airlines</i>", "🏢 <i>Frontier</i>"]
     assert subheaders_of(sjc) == ["🏢 <i>Frontier</i>", "🏢 <i>Southwest Airlines</i>"]
     # Per-airport views never merge: the hop shows at both ends.
@@ -159,10 +159,10 @@ def test_group_by_type_merges_and_splits_arrivals_departures():
 def test_airports_get_a_wider_gap_than_sub_blocks():
     text = render_digest(populated_store(), make_config("airport"))
     # Two blank lines between airport sections...
-    assert "\n\n\n🛬🛫 <b>SJC</b>" in text
+    assert "\n\n\n📍 <b>SJC</b>" in text
     # ...one between the sub-blocks inside an airport...
-    assert "\n\n🛫 <i>Departures</i>" in text
-    assert "\n\n\n🛫 <i>Departures</i>" not in text
+    assert "\n\n🛫 <i><u>Departures</u></i>" in text
+    assert "\n\n\n🛫 <i><u>Departures</u></i>" not in text
     # ...and one before the footer.
     assert "\n\n<i>Updated" in text and "\n\n\n<i>Updated" not in text
 
@@ -180,7 +180,7 @@ def test_every_mode_renders_header_footer_and_all_tails():
 
 def test_unknown_mode_falls_back_to_the_default():
     text = render_digest(populated_store(), make_config("nonsense"))
-    assert "🛬🛫 <b>SFO</b>" in text  # airport view, the default
+    assert "📍 <b>SFO</b>" in text  # airport view, the default
 
 
 def test_empty_digest_in_every_mode():

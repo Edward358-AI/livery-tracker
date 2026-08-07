@@ -227,7 +227,7 @@ def _airport_buckets(
     out: list[tuple[str, list[FlightEvent]]] = []
     for code in sorted(buckets):
         name = (config.target_airports.get(code) or {}).get("name", "")
-        title = f"🛬🛫 <b>{code}</b>" + (f" — {name}" if name else "")
+        title = f"📍 <b>{code}</b>" + (f" — {name}" if name else "")
         out.append((title, buckets[code]))
     return out
 
@@ -257,8 +257,8 @@ def _sections_by_airport(events: list[FlightEvent], config: Config) -> list[Sect
     sections: list[Section] = []
     for title, legs in _airport_buckets(events, config):
         sections.append((title, _sub_blocks([
-            ("🛬 <i>Arrivals</i>", [e for e in legs if e.type == EventType.ARRIVAL]),
-            ("🛫 <i>Departures</i>", [e for e in legs if e.type == EventType.DEPARTURE]),
+            ("🛬 <i><u>Arrivals</u></i>", [e for e in legs if e.type == EventType.ARRIVAL]),
+            ("🛫 <i><u>Departures</u></i>", [e for e in legs if e.type == EventType.DEPARTURE]),
         ])))
     return sections
 

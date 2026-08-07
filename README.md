@@ -300,7 +300,7 @@ watch. Example (the default airport-first layout):
 ✈️ LIVERY DIGEST — Sun Jul 26
 Watching 5 aircraft at OAK, SFO, SJC
 
-🛬🛫 SFO — San Francisco International
+📍 SFO — San Francisco International
 🛬 Arrivals
 🚨 N8658A — DEN➔SFO WN4670, ETA 1:02 PM PDT — 5,025 ft · 235 kts · 17 NM out
 
@@ -309,7 +309,7 @@ Watching 5 aircraft at OAK, SFO, SJC
 🕒 N642FR "Hugh the Manatee" — SFO➔LAX F92858, ETD 8:36 PM PDT
 
 
-🛬🛫 SJC — San Jose International
+📍 SJC — San Jose International
 🛬 Arrivals
 🟡 N8658A — LAS➔SJC WN1242, ETA 1:45 PM PDT
 
@@ -339,14 +339,14 @@ signal, a presumed landing) adopt whatever the source can prove.
 The digest can group the day three ways. Whatever you pick sticks (it's saved in
 `config_and_watch.json`) and the digest is redrawn immediately.
 
-**`/view airport`** — the default: one bold section per airport, and inside it
-an **🛬 Arrivals** block then a **🛫 Departures** block, each in time order (an
-empty block is omitted). Best when the question is "what's happening at SFO
+**`/view airport`** — the default: one bold 📍 section per airport, and inside
+it an underlined **🛬 Arrivals** block then a **🛫 Departures** block, each in
+time order (an empty block is omitted). Best when the question is "what's happening at SFO
 today". A flight connecting *two* watched airports deliberately appears under
 *both*, since it's a real departure at one end and a real arrival at the other.
 
 ```
-🛬🛫 SFO — San Francisco
+📍 SFO — San Francisco
 🛬 Arrivals
 🚨 N265AK "Xáat Kwáani" — SEA➔SFO AS1234, ETA 12:58 PM PDT — 12,400 ft · 310 kts · 48 NM out
 
@@ -361,7 +361,7 @@ you're fleet-watching specific carriers at each field; `/view airport` toggles
 back.
 
 ```
-🛬🛫 SFO — San Francisco
+📍 SFO — San Francisco
 🏢 Alaska Airlines
 🚨 N265AK "Xáat Kwáani" — SEA➔SFO AS1234, ETA 12:58 PM PDT — 12,400 ft · 310 kts · 48 NM out
 🟡 N596AS "Tiana's Bayou Adventure" — SFO➔SEA AS1311, ETD Mon 1:03 AM PDT
