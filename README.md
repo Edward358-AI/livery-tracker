@@ -1,4 +1,4 @@
-# ✈️ Aircraft Livery Tracker
+# Aircraft Livery Tracker
 
 Get a live Telegram message whenever one of your favorite special-livery aircraft is scheduled
 to arrive at or depart from *your* airports — with live ADS-B tracking as it happens.
