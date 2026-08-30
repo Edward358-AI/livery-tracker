@@ -409,14 +409,40 @@ class DigestManager:
         single = state.get("message_id")
         return [single] if single else []
 
-    async def _delete(self, message_ids: list[int]) -> None:
+    async def _delete(self, message_ids: list[int]) -> list[int]:
+        """Delete digest messages, returning the ids worth retrying later.
+
+        Telegram refuses to delete a bot message older than 48 h — those (and
+        already-gone messages) are dropped for good; a transient failure keeps
+        the id so the next refresh can try again.
+        """
+        retry: list[int] = []
         for message_id in message_ids:
             try:
                 await self.bot.delete_message(chat_id=self.chat_id, message_id=message_id)
-            except Exception as exc:  # noqa: BLE001 - >48h old, or already gone
-                log.debug("Could not delete digest message %s: %s", message_id, exc)
+            except BadRequest as exc:
+                if "not found" in str(exc).lower():
+                    continue  # already gone
+                log.warning(
+                    "Digest message %s can no longer be deleted (%s) — remove it in Telegram",
+                    message_id, exc,
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "Could not delete digest message %s (%s) — will retry", message_id, exc
+                )
+                retry.append(message_id)
+        return retry
 
-    async def _send_all(self, parts: list[str], today: str) -> None:
+    def _write_state(self, today: str, message_ids: list[int], stale_ids: list[int]) -> None:
+        state: dict = {"date": today, "message_ids": message_ids}
+        # Today's live messages are never strays — only past leftovers are.
+        stale = [i for i in dict.fromkeys(stale_ids) if i not in message_ids]
+        if stale:
+            state["stale_ids"] = stale
+        atomic_write_json(self._state_path(), state)
+
+    async def _send_all(self, parts: list[str], today: str, stale_ids: list[int]) -> None:
         sent: list[int] = []
         try:
             for text in parts:
@@ -430,7 +456,7 @@ class DigestManager:
         except Exception as exc:  # noqa: BLE001
             log.error("Digest send failed: %s", exc)
         if sent:
-            atomic_write_json(self._state_path(), {"date": today, "message_ids": sent})
+            self._write_state(today, sent, stale_ids)
 
     async def refresh(self) -> None:
         """Re-render and push the digest.
@@ -450,10 +476,16 @@ class DigestManager:
         today = datetime.now().astimezone().date().isoformat()
         state = self._load_state()
         stored = self._stored_ids(state)
+        stale = [i for i in state.get("stale_ids", []) if isinstance(i, int)]
+        had_stale = list(stale)
+
+        # Sweep strays left by earlier failed deletes (never today's messages).
+        if stale:
+            stale = await self._delete(stale)
 
         # New day: drop yesterday's digest so the chat holds only today's.
         if stored and state.get("date") != today:
-            await self._delete(stored)
+            stale += await self._delete(stored)
             stored = []
 
         if state.get("date") == today and stored:
@@ -472,10 +504,12 @@ class DigestManager:
                             log.warning("Digest edit failed: %s", exc)
                     except Exception as exc:  # noqa: BLE001
                         log.warning("Digest edit failed: %s", exc)
+                if stale != had_stale:
+                    self._write_state(today, stored, stale)
                 return
             # The digest grew or shrank by a whole message — rebuild it.
             log.info("Digest split changed (%d -> %d parts) — resending",
                      len(stored), len(parts))
-            await self._delete(stored)
+            stale += await self._delete(stored)
 
-        await self._send_all(parts, today)
+        await self._send_all(parts, today, stale)

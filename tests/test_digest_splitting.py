@@ -174,6 +174,72 @@ def test_legacy_single_id_state_is_understood():
     assert bot.sent == []
 
 
+def test_failed_deletes_are_remembered_and_retried():
+    """A delete that fails transiently must not orphan the message forever —
+    the id is kept as a stray and swept on a later refresh, while today's
+    digest keeps posting and editing untouched."""
+    class FlakyDeleteBot(FakeBot):
+        def __init__(self):
+            super().__init__()
+            self.fail_deletes = True
+
+        async def delete_message(self, chat_id, message_id):
+            if self.fail_deletes:
+                raise TimeoutError("network down")
+            await super().delete_message(chat_id, message_id)
+
+    bot = FlakyDeleteBot()
+    yesterday = (datetime.now().astimezone().date() - timedelta(days=1)).isoformat()
+    (data_dir() / "digest_state.json").write_text(
+        json.dumps({"date": yesterday, "message_ids": [40, 41]}), encoding="utf-8"
+    )
+    manager = DigestManager(bot, chat_id=1, store=store_with(6), config=make_config(6))
+
+    asyncio.run(manager.refresh())              # day change; deletes fail
+    assert bot.sent, "today's digest must still go out"
+    state = json.loads((data_dir() / "digest_state.json").read_text(encoding="utf-8"))
+    assert state["stale_ids"] == [40, 41]
+    assert 40 not in state["message_ids"]
+
+    bot.fail_deletes = False
+    asyncio.run(manager.refresh())              # later refresh sweeps the strays
+    assert bot.deleted == [40, 41]
+    state = json.loads((data_dir() / "digest_state.json").read_text(encoding="utf-8"))
+    assert "stale_ids" not in state
+    assert state["message_ids"] and not set(state["message_ids"]) & set(bot.deleted), \
+        "today's messages must never be swept as strays"
+
+
+def test_undeletable_messages_are_given_up_not_retried_forever():
+    """Telegram refuses deletes past 48h — such ids are dropped (with a
+    warning), not carried as strays for eternity."""
+    from telegram.error import BadRequest
+
+    class WalledBot(FakeBot):
+        def __init__(self):
+            super().__init__()
+            self.attempts = 0
+
+        async def delete_message(self, chat_id, message_id):
+            self.attempts += 1
+            raise BadRequest("Message can't be deleted")
+
+    bot = WalledBot()
+    yesterday = (datetime.now().astimezone().date() - timedelta(days=1)).isoformat()
+    (data_dir() / "digest_state.json").write_text(
+        json.dumps({"date": yesterday, "message_ids": [40, 41]}), encoding="utf-8"
+    )
+    manager = DigestManager(bot, chat_id=1, store=store_with(6), config=make_config(6))
+
+    asyncio.run(manager.refresh())
+    assert bot.attempts == 2                    # one try per id
+    state = json.loads((data_dir() / "digest_state.json").read_text(encoding="utf-8"))
+    assert "stale_ids" not in state             # given up, not queued
+
+    asyncio.run(manager.refresh())
+    assert bot.attempts == 2                    # and never tried again
+
+
 def test_live_leg_without_contact_still_shows_its_scheduled_time():
     """A dark live leg must show its ETD/ETA and say why it has no figures —
     a bare "live tracking active" hid the one thing the reader wanted (the
