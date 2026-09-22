@@ -15,7 +15,7 @@ from . import __version__
 from . import aircraft as aircraft_db
 from . import airports as airport_db
 from . import tracker, updater
-from .config import Config
+from .config import Config, normalize_reg
 from .digest import DEFAULT_GROUP_MODE, GROUP_MODES, SAFE_LIMIT, format_leg, telegram_length
 from .resolver import resolve_aircraft
 from .throttle import Cooldown
@@ -228,8 +228,10 @@ async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     tail = context.args[0].upper()
     config = _config(context)
-    if tail in config.watchlist:
-        await _reply_parts(update.message, f"{tail} is already on the watchlist.")
+    existing = config.watched_as(tail)
+    if existing is not None:
+        as_note = f" (as {existing})" if existing != tail else ""
+        await _reply_parts(update.message, f"{tail} is already on the watchlist{as_note}.")
         return
     if len(config.watchlist) >= MAX_WATCHLIST:
         await _reply_parts(
@@ -301,8 +303,11 @@ def _parse_import_lines(text: str) -> tuple[list[str], int]:
         if not _REG_RE.match(entry):
             ignored += 1
             continue
-        if entry not in seen:
-            seen.add(entry)
+        # Dedupe on the normalized form: a list carrying VH-ZNJ and VHZNJ
+        # names the same aircraft twice, and the first spelling wins.
+        key = normalize_reg(entry)
+        if key not in seen:
+            seen.add(key)
             regs.append(entry)
     return regs, ignored
 
@@ -337,10 +342,12 @@ async def _background_import(application, chat_id: int, regs: list[str]) -> None
         for index, tail in enumerate(regs):
             if index:
                 await asyncio.sleep(IMPORT_SPACING_S)
-            if tail in config.watchlist:
+            existing = config.watched_as(tail)
+            if existing is not None:
                 already += 1
+                as_note = f" (as {existing})" if existing != tail else ""
                 await application.bot.send_message(
-                    chat_id, f"➖ {tail} is already on the watchlist."
+                    chat_id, f"➖ {tail} is already on the watchlist{as_note}."
                 )
                 continue
             if len(config.watchlist) >= MAX_WATCHLIST:

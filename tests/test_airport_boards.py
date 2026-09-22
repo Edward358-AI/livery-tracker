@@ -168,6 +168,36 @@ def test_board_and_tail_phases_do_not_duplicate_a_shared_flight(monkeypatch):
     assert drift_min == 4, "the fresher per-tail time should win"
 
 
+def test_watchlist_mutation_during_tail_sweep_does_not_crash(monkeypatch):
+    """/remove (or /add) while a harvest's tail sweep is between awaits must
+    not blow up the iteration — the /remove-during-/refresh crash."""
+    config = make_config()
+    config.watchlist = {"N265AK": {"livery": "Retro"}, "N538AS": {"livery": "Star Wars"}}
+    store = FlightStore()
+    app = FakeApp(store, config)
+
+    class FakeDigest:
+        async def refresh(self):
+            pass
+
+    app.bot_data["digest"] = FakeDigest()
+
+    async def no_heal(cfg):
+        return 0
+
+    def tail_sweep(tail, livery, cfg):
+        config.watchlist.pop("N538AS", None)  # the user's /remove lands mid-sweep
+        return ([], True)
+
+    monkeypatch.setattr(tracker, "heal_unknown_metadata", no_heal)
+    monkeypatch.setattr(sp, "harvest_airport_boards", lambda cfg: ([], True))
+    monkeypatch.setattr(sp, "harvest_tail", tail_sweep)
+
+    result = asyncio.run(tracker.run_harvest(app))
+    assert result.skipped is False
+    assert "N538AS" not in config.watchlist
+
+
 def test_second_harvest_is_skipped_while_one_is_running():
     async def scenario():
         async with tracker._harvest_lock:

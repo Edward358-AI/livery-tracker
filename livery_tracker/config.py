@@ -106,6 +106,16 @@ def harvest_time() -> tuple[int, int]:
         return 6, 0
 
 
+def normalize_reg(reg: str) -> str:
+    """Canonical form of a registration for comparisons: uppercase, no hyphens.
+
+    VH-ZNJ and VHZNJ are the same aircraft; sources accept either spelling,
+    so stored keys keep the form the user typed — only equality checks
+    collapse the two.
+    """
+    return reg.upper().replace("-", "")
+
+
 @dataclass
 class Config:
     """In-memory view of config_and_watch.json."""
@@ -137,6 +147,16 @@ class Config:
         )
 
     # -- helpers -----------------------------------------------------------
+
+    def watched_as(self, reg: str) -> str | None:
+        """The watchlist key already covering this registration, if any —
+        matching on the normalized form, so a hyphen variant can't slip in
+        as a second copy of the same aircraft."""
+        wanted = normalize_reg(reg)
+        for tail in self.watchlist:
+            if normalize_reg(tail) == wanted:
+                return tail
+        return None
 
     def airport_codes(self) -> set[str]:
         """Every IATA and ICAO code among the configured target airports, uppercased."""

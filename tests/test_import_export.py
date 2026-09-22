@@ -50,6 +50,20 @@ B2002
     assert ignored == 1, "prose lines are counted, comments and blanks are free"
 
 
+def test_parse_import_lines_collapses_hyphen_variants():
+    # VH-ZNJ and VHZNJ are the same aircraft — the first spelling wins.
+    regs, ignored = bot._parse_import_lines("VH-ZNJ\nVHZNJ\nD-ABYT\n")
+    assert regs == ["VH-ZNJ", "D-ABYT"]
+    assert ignored == 0
+
+
+def test_watched_as_matches_across_spellings():
+    config = make_config(watching=["VH-ZNJ"])
+    assert config.watched_as("VH-ZNJ") == "VH-ZNJ"
+    assert config.watched_as("VHZNJ") == "VH-ZNJ"
+    assert config.watched_as("VH-ZNE") is None
+
+
 def test_export_output_reimports_cleanly():
     regs, ignored = bot._parse_import_lines("# 2 registrations exported 2026-08-05\nN1\nN2\n")
     assert regs == ["N1", "N2"] and ignored == 0
@@ -113,6 +127,18 @@ def test_background_import_reports_each_tail(monkeypatch):
     assert "1 already watched" in sent[4] and "2 added" in sent[4] and "1 unresolved" in sent[4]
     assert "N102" in config.watchlist and "N103" in config.watchlist
     assert "N101" not in config.watchlist, "unresolved entries are skipped"
+
+
+def test_background_import_refuses_a_spelling_twin(monkeypatch):
+    """A hyphen variant of a watched tail is a duplicate, not a new aircraft."""
+    config = make_config(watching=["VH-ZNJ"])
+    app = import_app(config)
+    monkeypatch.setattr(bot, "IMPORT_SPACING_S", 0)
+
+    asyncio.run(bot._background_import(app, 1, ["VHZNJ"]))
+
+    assert "➖ VHZNJ is already on the watchlist (as VH-ZNJ)." in app.bot.sent[0]
+    assert "VHZNJ" not in config.watchlist
 
 
 def test_background_import_stops_at_the_watchlist_cap(monkeypatch):

@@ -44,7 +44,7 @@ from . import aircraft as aircraft_db
 from . import airports as airport_db
 from . import schedule_provider
 from .adsb import Telemetry, fetch_telemetry, resolve_callsign_route
-from .config import Config
+from .config import Config, normalize_reg
 from .digest import DigestManager, fmt_local
 from .flights import (
     EventState,
@@ -1287,6 +1287,19 @@ async def heal_unknown_metadata(config: Config) -> int:
     type code either, so the digest showed no equipment label for them —
     resolving them here backfills the cache the same way.
     """
+    # Surface (never auto-fix) spelling twins: /add and import refuse them
+    # now, but a pair that predates that check sits harvesting double.
+    spellings: dict[str, str] = {}
+    for tail in config.watchlist:
+        key = normalize_reg(tail)
+        if key in spellings:
+            log.warning(
+                "Watchlist holds %s and %s — the same aircraft under two "
+                "spellings; /remove one of them", spellings[key], tail,
+            )
+        else:
+            spellings[key] = tail
+
     cache = aircraft_db.load_cache()
     stale = [
         tail for tail, meta in config.watchlist.items()
@@ -1297,8 +1310,10 @@ async def heal_unknown_metadata(config: Config) -> int:
     healed = 0
     for tail in stale:
         info = await asyncio.to_thread(resolve_aircraft, tail)
+        entry = config.watchlist.get(tail)
+        if entry is None:
+            continue  # /remove'd while this pass was resolving
         aircraft_db.record_profile(tail, info)  # feeds the digest's type codes
-        entry = config.watchlist[tail]
         changed = False
         for key in ("airline", "model", "livery", "thumbnail"):
             if _is_missing(entry.get(key)) and not _is_missing(info.get(key)):
@@ -1455,7 +1470,9 @@ async def _run_harvest_locked(application: Application) -> HarvestResult:
 
     # --- Phase 2: per-tail sweep (authoritative, catches board gaps) --------
     started = _now()
-    for tail, meta in config.watchlist.items():
+    # Snapshot: /add and /remove can mutate the watchlist between this
+    # loop's awaits, and iterating the live dict then blows up mid-sweep.
+    for tail, meta in list(config.watchlist.items()):
         events, ok = await asyncio.to_thread(
             schedule_provider.harvest_tail, tail, meta.get("livery", ""), config
         )
@@ -1929,7 +1946,7 @@ async def job_adsb_watch(context: ContextTypes.DEFAULT_TYPE) -> None:
     now = _now()
     created = 0
 
-    for tail, meta in config.watchlist.items():
+    for tail, meta in list(config.watchlist.items()):  # snapshot: /add & /remove race the awaits
         telemetry = await asyncio.to_thread(fetch_telemetry, tail)
         await asyncio.sleep(1.5)  # stay polite to the community APIs
         if telemetry is None or telemetry.on_ground or not telemetry.callsign:
