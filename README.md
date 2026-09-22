@@ -283,11 +283,16 @@ year permanently. Position and schedules are always fetched live. Add
 ## Reading the digest
 
 The digest bot keeps **one message per day**, edited in place as flights
-progress (yesterday's digest is deleted each morning). Each registration shows
-its equipment type code when known — `N538AS (B739) "Star Wars"` — pulled from
-the aircraft dossier cache, so it fills in automatically as tails get resolved.
+progress (yesterday's digest is deleted each morning). Each line leads with the
+**livery name in bold** — the reason the aircraft is watched — and ends with its
+identity: the registration, which **links to the aircraft's FlightAware page**
+(tap it for gates, landing-vs-gate times and the full track), plus the equipment
+type code when known — `Star Wars — … · N538AS (B739)` — pulled from the
+aircraft dossier cache, so it fills in automatically as tails get resolved. A
+leg with no livery on file leads with the linked registration instead. Times
+carry no per-line timezone; the `Updated` footer stamps the zone once.
 When the source publishes a terminal/gate for the watched airport, it appears
-after the time — `ETD 2:47 PM PDT · T2 D15` — mirrored like the times (updated
+after the time — `ETD 2:47 PM · T2 D15` — mirrored like the times (updated
 when it changes, dropped when the source goes silent, never shown as a guess),
 and it disappears once the leg concludes. Gates are display-only: they are the
 flakiest datum in aviation, so nothing in the tracking logic depends on them. If your watchlist grows
@@ -302,16 +307,16 @@ Watching 5 aircraft at OAK, SFO, SJC
 
 📍 SFO — San Francisco International
 🛬 Arrivals
-🚨 N8658A — DEN➔SFO WN4670, ETA 1:02 PM PDT — 5,025 ft · 235 kts · 17 NM out
+🚨 N8658A (B737) — DEN➔SFO WN4670, ETA 1:02 PM — 5,025 ft · 235 kts · 17 NM out
 
 🛫 Departures
-🚨 N265AK "West Coast Wonders" — SFO➔LAX AS1052, departed 9:04 AM PDT
-🕒 N642FR "Hugh the Manatee" — SFO➔LAX F92858, ETD 8:36 PM PDT
+🚨 West Coast Wonders — SFO➔LAX AS1052, departed 9:04 AM · N265AK (B39M)
+🕒 Hugh the Manatee — SFO➔LAX F92858, ETD 8:36 PM · N642FR (A20N)
 
 
 📍 SJC — San Jose International
 🛬 Arrivals
-🟡 N8658A — LAS➔SJC WN1242, ETA 1:45 PM PDT
+🟡 N8658A (B737) — LAS➔SJC WN1242, ETA 1:45 PM
 
 Updated 7:57 PM PDT
 ```
@@ -348,10 +353,10 @@ today". A flight connecting *two* watched airports deliberately appears under
 ```
 📍 SFO — San Francisco
 🛬 Arrivals
-🚨 N265AK "Xáat Kwáani" — SEA➔SFO AS1234, ETA 12:58 PM PDT — 12,400 ft · 310 kts · 48 NM out
+🚨 Xáat Kwáani — SEA➔SFO AS1234, ETA 12:58 PM — 12,400 ft · 310 kts · 48 NM out · N265AK (B738)
 
 🛫 Departures
-🟡 N642FR "Hugh the Manatee" — SFO➔SJC F9100, ETD 11:43 PM PDT
+🟡 Hugh the Manatee — SFO➔SJC F9100, ETD 11:43 PM · N642FR (A20N)
 ```
 
 **`/view airline`** — the same airport sections, but each one re-cut **by
@@ -363,8 +368,8 @@ back.
 ```
 📍 SFO — San Francisco
 🏢 Alaska Airlines
-🚨 N265AK "Xáat Kwáani" — SEA➔SFO AS1234, ETA 12:58 PM PDT — 12,400 ft · 310 kts · 48 NM out
-🟡 N596AS "Tiana's Bayou Adventure" — SFO➔SEA AS1311, ETD Mon 1:03 AM PDT
+🚨 Xáat Kwáani — SEA➔SFO AS1234, ETA 12:58 PM — 12,400 ft · 310 kts · 48 NM out · N265AK (B738)
+🟡 Tiana's Bayou Adventure — SFO➔SEA AS1311, ETD Mon 1:03 AM · N596AS (B739)
 ```
 
 **`/view type`** — the flat legacy layout: every airport pooled into one
@@ -378,11 +383,16 @@ under the hood).
 
 - `delayed 47m` — the sync mirrored the source's own delay figure (it clears
   again if the airline recovers).
-- `ETD 10:40 AM PDT — polling, no ADS-B contact yet` — the leg is inside its
+- `ETA 1:36 PM · wheels ≈1:24 PM` — the mirrored ETA is the source's *gate*
+  time; `wheels ≈` is the tracker's own touchdown projection from live
+  distance, speed and remaining descent, shown once a live arrival is inside
+  150 NM. `≈` always marks a projection — `~` stays reserved for times
+  adopted from the source's record.
+- `ETD 10:40 AM — polling, no ADS-B contact yet` — the leg is inside its
   live window and being polled every 2 minutes, but the aircraft's transponder
   hasn't been picked up (usually parked at a gate). The scheduled time keeps
   updating from the source until the first position arrives. Once it does, the
-  same line carries the live figures after the time: `ETA 1:02 PM PDT — 5,025 ft
+  same line carries the live figures after the time: `ETA 1:02 PM — 5,025 ft
   · 235 kts · 17 NM out`.
 - `~10:51 AM (per source)` — the outcome was adopted from the source's record
   rather than watched live (e.g. the aircraft was already wearing its next
@@ -500,6 +510,20 @@ under the hood).
   with a by-flight-number fallback.
 - **Diversions**: an arrival confirmed on the ground 30+ NM from your airport on two
   consecutive polls is marked ↪️ *diverted*, with the nearest sizeable airport named.
+- **Touchdown times are interpolated**: a fix arrives only every 2 minutes, so
+  the poll that concludes an arrival catches the aircraft on short final or
+  already rolling out. The landed time projects the height still to lose
+  through the observed descent rate (against field elevation) instead of
+  stamping the poll time, pinning wheels-down to roughly ±30 seconds.
+- **…and audited**: right after a landing concludes, one FR24 track fetch
+  records the seconds-precise wheels-down time beside the interpolated stamp
+  in `history.jsonl` (`touchdown_at` vs `touchdown_fr24_at`). The interpolated
+  time stays the displayed one; the recorded pair is for checking the
+  estimator against ground truth.
+- **Wheels-down is predicted, not just confirmed**: a live arrival inside
+  150 NM carries `wheels ≈1:24 PM` next to the mirrored ETA — the ETA is the
+  airline's gate time, roughly ten minutes after the touchdown a spotter is
+  actually at the fence for.
 - **Signal loss**: ADS-B coverage is patchy near the ground, so a plane last seen low
   and close that goes dark is concluded ✅ *landed (signal lost on approach)*; one
   that never shows up at all is annotated *likely delayed* and only marked ⚠️ *lost*

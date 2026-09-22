@@ -110,11 +110,14 @@ def test_totally_unknown_aircraft_keeps_placeholders(monkeypatch):
 # -- self-healing of already-stored "Unknown" entries ---------------------------
 
 def test_heal_fills_in_previously_unknown_entries(monkeypatch):
+    from livery_tracker import aircraft
+
     config = Config()
     config.watchlist = {
         "N8710M": {"airline": "Unknown airline", "model": "Unknown type", "livery": ""},
         "N265AK": {"airline": "Alaska Airlines", "model": "B739", "livery": "Retro"},
     }
+    aircraft.record_profile("N265AK", {"type_code": "B739"})  # fully healthy
     called: list[str] = []
 
     def fake_resolve(reg):
@@ -138,14 +141,38 @@ def test_heal_fills_in_previously_unknown_entries(monkeypatch):
 
 
 def test_heal_is_a_noop_when_nothing_is_unknown(monkeypatch):
-    """Healthy watchlists must cost zero network calls on every harvest."""
+    """Healthy watchlists must cost zero network calls on every harvest.
+
+    Healthy now includes the dossier cache: the digest's type code must be
+    on file, or the tail is worth a resolve.
+    """
+    from livery_tracker import aircraft
+
     config = Config()
     config.watchlist = {"N265AK": {"airline": "Alaska Airlines", "model": "B739"}}
+    aircraft.record_profile("N265AK", {"type_code": "B739"})
     calls: list[str] = []
     monkeypatch.setattr(tracker, "resolve_aircraft", lambda reg: calls.append(reg) or {})
 
     assert asyncio.run(tracker.heal_unknown_metadata(config)) == 0
     assert calls == []
+
+
+def test_heal_backfills_missing_type_codes(monkeypatch):
+    """A tail watched from before /add seeded the dossier cache has airline
+    and model in the watchlist but no cached type code — heal resolves it and
+    feeds the cache so the digest can label the leg."""
+    from livery_tracker import aircraft
+
+    config = Config()
+    config.watchlist = {
+        "N167AN": {"airline": "American Airlines", "model": "Airbus A321-231",
+                   "livery": "Flagship Valor"},
+    }
+    monkeypatch.setattr(tracker, "resolve_aircraft", lambda reg: {"type_code": "A321"})
+
+    asyncio.run(tracker.heal_unknown_metadata(config))
+    assert aircraft.load_cache()["N167AN"]["type_code"] == "A321"
 
 
 def test_heal_leaves_entry_alone_when_still_unresolvable(monkeypatch):

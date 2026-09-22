@@ -2,14 +2,19 @@
 
 from datetime import datetime, timedelta, timezone
 
+from livery_tracker.adsb import Telemetry
 from livery_tracker.flights import EventState, EventType, FlightEvent
 from livery_tracker.schedule_provider import LegRefresh, row_is_cancelled
 from livery_tracker.tracker import (
     LIVE_MAX_OVERRUN,
+    TOUCHDOWN_MAX_PROJECTION,
+    WHEELS_ETA_MAX_DIST_NM,
     _apply_delay_pushback,
     _callsign_matches_flight,
     _conclude_dark_leg,
+    _estimate_touchdown,
     _no_show_note,
+    _predict_touchdown,
 )
 
 
@@ -115,6 +120,93 @@ def test_short_silence_keeps_polling():
     ev = make_live_event(EventType.ARRIVAL, NOW - timedelta(minutes=5),
                          seen(2, alt=1400, dist_nm=4.0))
     assert _conclude_dark_leg(ev, NOW) is None
+
+
+# -- touchdown interpolation ----------------------------------------------------
+#
+# The 2-minute poll cadence means the concluding fix is on short final (early)
+# or already rolling out (late). The estimator projects the height still to
+# lose through the observed descent rate instead of stamping poll time.
+
+def live_fix(alt, ground=False, rate=None, gs=140.0) -> Telemetry:
+    return Telemetry(lat=37.6, lon=-122.4, alt_ft=alt, on_ground=ground,
+                     gs_kts=gs, baro_rate=rate, callsign="ASA1234", source="test")
+
+
+def test_touchdown_projected_forward_from_short_final():
+    # 400 ft AGL descending 800 fpm: wheels meet the runway in ~30 s.
+    est = _estimate_touchdown(live_fix(400, rate=-800), seen(2), None, NOW)
+    assert est == NOW + timedelta(seconds=30)
+
+
+def test_touchdown_interpolated_back_from_a_rollout_fix():
+    # On the ground now; two minutes ago it was at 700 ft descending 700 fpm,
+    # so it touched down about a minute before this poll.
+    prev = seen(2, alt=700, baro_rate=-700)
+    est = _estimate_touchdown(live_fix(0, ground=True), prev, None, NOW)
+    assert est == NOW - timedelta(minutes=1)
+
+
+def test_touchdown_uses_field_elevation_for_height():
+    # 5,700 ft over a 5,000 ft field is 700 ft AGL, not 5,700.
+    prev = seen(2, alt=5700, baro_rate=-700)
+    est = _estimate_touchdown(live_fix(0, ground=True), prev, 5000.0, NOW)
+    assert est == NOW - timedelta(minutes=1)
+
+
+def test_touchdown_without_a_descent_rate_splits_the_gap():
+    # Airborne then, on the ground now, no rate to project: the midpoint
+    # halves the maximum error instead of always stamping late.
+    prev = seen(2, alt=900, baro_rate=None)
+    est = _estimate_touchdown(live_fix(0, ground=True), prev, None, NOW)
+    assert est == NOW - timedelta(minutes=1)
+
+
+def test_touchdown_never_leaves_the_observation_window():
+    # A stale descent rate would project past "on the ground now" — clamp.
+    prev = seen(2, alt=10000, baro_rate=-500)
+    est = _estimate_touchdown(live_fix(0, ground=True), prev, None, NOW)
+    assert est == NOW
+    # And a short-final projection is capped rather than trusted forever.
+    est = _estimate_touchdown(live_fix(4000, rate=-100), seen(2), None, NOW)
+    assert est == NOW + TOUCHDOWN_MAX_PROJECTION
+
+
+def test_touchdown_falls_back_to_poll_time_without_a_usable_prior_fix():
+    already_down = _estimate_touchdown(
+        live_fix(0, ground=True), seen(2, alt=0, on_ground=True), None, NOW
+    )
+    assert already_down == NOW
+    no_history = _estimate_touchdown(live_fix(0, ground=True), {}, None, NOW)
+    assert no_history == NOW
+
+
+# -- predicted wheels-down for live arrivals ------------------------------------
+
+def test_wheels_prediction_is_distance_over_speed():
+    # 70 NM at 140 kts: half an hour out.
+    est = _predict_touchdown(live_fix(12000), 70.0, None, NOW)
+    assert est == NOW + timedelta(minutes=30)
+
+
+def test_wheels_prediction_is_bounded_by_the_descent_still_to_fly():
+    # 10 NM at 300 kts says 2 minutes — but 7,000 ft at 700 fpm says 10.
+    # The descent is the binding constraint.
+    est = _predict_touchdown(live_fix(7000, rate=-700, gs=300.0), 10.0, None, NOW)
+    assert est == NOW + timedelta(minutes=10)
+
+
+def test_wheels_prediction_measures_descent_against_the_field():
+    # 5,700 ft over a 5,000 ft field: only 700 ft to lose, so distance
+    # (2 NM at 120 kts = 1 min) and descent (1 min) agree.
+    est = _predict_touchdown(live_fix(5700, rate=-700, gs=120.0), 2.0, 5000.0, NOW)
+    assert est == NOW + timedelta(minutes=1)
+
+
+def test_wheels_prediction_only_inside_the_window():
+    assert _predict_touchdown(live_fix(34000, gs=450.0), WHEELS_ETA_MAX_DIST_NM + 1, None, NOW) is None
+    assert _predict_touchdown(live_fix(0, ground=True), 3.0, None, NOW) is None
+    assert _predict_touchdown(live_fix(2000, gs=30.0), 20.0, None, NOW) is None  # bogus speed
 
 
 def test_departure_dark_after_takeoff_becomes_departed():

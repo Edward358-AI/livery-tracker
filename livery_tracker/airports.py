@@ -37,6 +37,7 @@ class Airport:
     lat: float
     lon: float
     rank: int = 0  # size score from _TYPE_RANK (+1 for scheduled service)
+    elevation_ft: float | None = None  # field elevation, for AGL heights
 
 
 _index: dict[str, Airport] | None = None
@@ -93,8 +94,13 @@ def _build_index() -> dict[str, Airport]:
         icao = (row.get("icao_code") or row.get("ident") or "").strip().upper()
         iata = (row.get("iata_code") or "").strip().upper()
         r = _TYPE_RANK.get(row.get("type", ""), 0) + (1 if row.get("scheduled_service") == "yes" else 0)
+        try:
+            elevation = float(row["elevation_ft"])
+        except (ValueError, KeyError, TypeError):
+            elevation = None
         airport = Airport(
-            icao=icao, iata=iata, name=row.get("name", "").strip(), lat=lat, lon=lon, rank=r
+            icao=icao, iata=iata, name=row.get("name", "").strip(), lat=lat, lon=lon,
+            rank=r, elevation_ft=elevation,
         )
         for code in {icao, iata, (row.get("ident") or "").strip().upper()} - {""}:
             if r >= rank.get(code, -99):

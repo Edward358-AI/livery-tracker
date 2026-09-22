@@ -1,6 +1,6 @@
 import asyncio
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from livery_tracker.config import Config, data_dir
@@ -77,12 +77,16 @@ def test_render_sections_and_states():
     text = render_digest(store, make_config())
     assert "🛬 <b>Arrivals</b>" in text
     assert "🛫 <b>Departures</b>" in text
-    assert "🟡 <b>N265AK</b>" in text                       # scheduled arrival
+    assert "🟡 <b>More to Love</b>" in text                 # livery leads the line
     assert "12,400 ft · 310 kts · 48 NM out" in text        # live telemetry line
     # A live leg keeps its expected time: distance alone never says whether
     # the aircraft is early, late or on time.
     assert "ETA" in text.split("12,400 ft")[0].splitlines()[-1]
-    assert "✅ <b>N711HK</b> — SEA➔SFO AS1234 @ SFO, landed 4:06 PM PDT" in text
+    # No livery -> the linked tail leads instead, and the per-line zone is gone.
+    assert (
+        '✅ <b><a href="https://www.flightaware.com/live/flight/N711HK">N711HK</a></b>'
+        " — SEA➔SFO AS1234 @ SFO, landed 4:06 PM" in text
+    )
     assert "SFO➔RDU" in text                                # departure leg present
     assert "Updated" in text
 
@@ -99,7 +103,7 @@ def test_type_code_appears_next_to_the_registration(monkeypatch):
     store.upsert(make_event("a1", EventType.ARRIVAL, EventState.WAITING_2H))
     text = render_digest(store, make_config())
 
-    assert "<b>N265AK</b> (B739)" in text
+    assert "N265AK</a> (B739)" in text
 
 
 def test_missing_type_code_renders_without_a_label(monkeypatch):
@@ -112,7 +116,61 @@ def test_missing_type_code_renders_without_a_label(monkeypatch):
     store.upsert(make_event("a1", EventType.ARRIVAL, EventState.WAITING_2H))
     text = render_digest(store, make_config())
 
-    assert "<b>N265AK</b> (" not in text, "no cached code -> no label, no clutter"
+    assert "N265AK</a> (" not in text, "no cached code -> no label, no clutter"
+
+
+def test_tail_links_to_flightaware():
+    store = FlightStore()
+    store.upsert(make_event("a1", EventType.ARRIVAL, EventState.WAITING_2H))
+    text = render_digest(store, make_config())
+    # Livery leads; the identity trails as the tap target.
+    assert '· <a href="https://www.flightaware.com/live/flight/N265AK">N265AK</a>' in text
+
+
+def test_hyphenated_registrations_link_without_the_hyphen():
+    """FlightAware idents drop the hyphen (D-ABYT -> DABYT); the visible
+    registration keeps it."""
+    from livery_tracker.digest import format_leg
+
+    ev = make_event("a1", EventType.ARRIVAL, EventState.WAITING_2H, tail="D-ABYT")
+    line = format_leg(ev)
+    assert 'href="https://www.flightaware.com/live/flight/DABYT"' in line
+    assert ">D-ABYT</a>" in line
+
+
+def test_per_line_timezone_is_stripped():
+    """Every time in the digest is in the same zone, so lines drop it and the
+    footer's 'Updated ...' stamp carries it once."""
+    store = FlightStore()
+    landed = make_event("a1", EventType.ARRIVAL, EventState.LANDED)
+    landed.status_note = "4:06 PM PDT"
+    store.upsert(landed)
+    text = render_digest(store, make_config())
+    assert "landed 4:06 PM" in text
+    assert "4:06 PM PDT" not in text
+
+
+def test_live_arrival_shows_its_projected_wheels_time():
+    store = FlightStore()
+    live = make_event("a2", EventType.ARRIVAL, EventState.LIVE)
+    soon = datetime.now().astimezone() + timedelta(minutes=20)
+    live.last_telemetry = {"alt": 12400, "gs": 310.0, "dist_nm": 48.2,
+                           "wheels_eta_at": soon.isoformat()}
+    store.upsert(live)
+    text = render_digest(store, make_config())
+    assert " · wheels ≈" in text
+    assert "wheels ≈~" not in text  # ≈ is a projection; ~ stays source-adopted
+
+
+def test_stale_wheels_projection_is_hidden():
+    store = FlightStore()
+    live = make_event("a2", EventType.ARRIVAL, EventState.LIVE)
+    passed = datetime.now().astimezone() - timedelta(minutes=5)
+    live.last_telemetry = {"alt": 500, "gs": 140.0, "dist_nm": 2.0,
+                           "wheels_eta_at": passed.isoformat()}
+    store.upsert(live)
+    text = render_digest(store, make_config())
+    assert "wheels" not in text
 
 
 def test_render_lost_state():
@@ -156,10 +214,11 @@ def test_flight_between_two_watched_airports_renders_as_one_line():
 
     text = render_digest(store, make_config())
     assert "🔁 <b>Between your airports</b>" in text
-    assert "🚨 <b>N265AK</b>" in text                    # arrival phase is the live one
-    assert "departed 9:04 AM PDT → ETA" in text
+    assert "🚨 <b>More to Love</b>" in text              # arrival phase is the live one
+    assert "departed 9:04 AM → ETA" in text
     assert "21,000 ft · 415 kts · 62 NM out" in text
-    assert text.count("N265AK") == 1                     # merged: not repeated in Arr/Dep sections
+    # One rendered line only (the link text, not the href, counts a leg).
+    assert text.count(">N265AK</a>") == 1                # merged: not repeated in Arr/Dep sections
     assert "🛬 <b>Arrivals</b>" not in text
     assert "🛫 <b>Departures</b>" not in text
 

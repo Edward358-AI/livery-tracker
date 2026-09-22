@@ -40,6 +40,7 @@ from typing import Callable
 from telegram.ext import Application, ContextTypes
 
 from . import adsb
+from . import aircraft as aircraft_db
 from . import airports as airport_db
 from . import schedule_provider
 from .adsb import Telemetry, fetch_telemetry, resolve_callsign_route
@@ -160,7 +161,7 @@ def _recorded_landing_time(event: FlightEvent) -> datetime | None:
     """The ADS-B-confirmed landing time stored on a terminal arrival."""
     if event.status != EventState.LANDED:
         return None
-    seen_at = event.last_telemetry.get("seen_at")
+    seen_at = event.last_telemetry.get("touchdown_at") or event.last_telemetry.get("seen_at")
     if not seen_at:
         return None
     try:
@@ -168,6 +169,77 @@ def _recorded_landing_time(event: FlightEvent) -> datetime | None:
     except (TypeError, ValueError):
         return None
     return when if when.tzinfo else when.replace(tzinfo=timezone.utc)
+
+
+# Touchdown interpolation: with a fix only every 2 minutes, the poll that
+# concludes an arrival sees the aircraft either already rolling out (a stamp
+# of poll time runs late) or still on short final under 500 ft (it runs
+# early). Projecting the height still to lose through the observed descent
+# rate recovers the actual touchdown moment to roughly ±30 s.
+TOUCHDOWN_MAX_PROJECTION = timedelta(minutes=4)
+
+
+def _field_elevation(code: str) -> float | None:
+    try:
+        airport = airport_db.lookup(code)
+    except Exception:  # noqa: BLE001 - elevation is a refinement, never a blocker
+        return None
+    return airport.elevation_ft if airport else None
+
+
+def _estimate_touchdown(
+    telemetry: Telemetry, prev: dict, elevation_ft: float | None, now: datetime
+) -> datetime:
+    """Best estimate of when the wheels actually met the runway."""
+    elev = elevation_ft or 0.0
+
+    def projected(alt_ft, rate, since: datetime) -> datetime | None:
+        if alt_ft is None or not rate or rate >= 0:
+            return None
+        height = max(float(alt_ft) - elev, 0.0)
+        return since + timedelta(minutes=height / abs(rate))
+
+    if not telemetry.on_ground:
+        # Concluding on short final: touchdown is just ahead of this fix.
+        est = projected(telemetry.alt_ft, telemetry.baro_rate, now)
+        return min(est, now + TOUCHDOWN_MAX_PROJECTION) if est else now
+
+    # Already on the ground: touchdown fell between this fix and the last
+    # airborne one — project that one's descent, or split the difference.
+    try:
+        prev_seen = datetime.fromisoformat(prev.get("seen_at") or "")
+    except (TypeError, ValueError):
+        return now
+    if not prev_seen.tzinfo:
+        prev_seen = prev_seen.replace(tzinfo=timezone.utc)
+    if prev.get("on_ground") or prev.get("alt") is None:
+        return now
+    est = projected(prev.get("alt"), prev.get("baro_rate"), prev_seen)
+    if est is None:
+        est = prev_seen + (now - prev_seen) / 2
+    return min(max(est, prev_seen), now)
+
+
+# Predicted wheels-down for a live arrival ("wheels ≈1:24 PM" in the digest):
+# the source's ETA is gate arrival, which runs ~10 minutes behind touchdown —
+# the moment a spotter actually cares about. Projected from remaining distance
+# at current groundspeed, bounded below by the descent still to fly; only
+# shown inside this range, where the projection is worth reading.
+WHEELS_ETA_MAX_DIST_NM = 150.0
+
+
+def _predict_touchdown(
+    telemetry: Telemetry, dist_nm: float | None, elevation_ft: float | None, now: datetime
+) -> datetime | None:
+    if telemetry.on_ground or dist_nm is None or dist_nm > WHEELS_ETA_MAX_DIST_NM:
+        return None
+    if not telemetry.gs_kts or telemetry.gs_kts <= 50:
+        return None
+    hours = dist_nm / telemetry.gs_kts
+    if telemetry.baro_rate and telemetry.baro_rate < 0:
+        height = max(telemetry.alt_ft - (elevation_ft or 0.0), 0.0)
+        hours = max(hours, height / abs(telemetry.baro_rate) / 60.0)
+    return now + timedelta(hours=hours)
 
 
 def _arrival_can_precede_outbound(outbound: FlightEvent, inbound_time: datetime) -> bool:
@@ -688,6 +760,7 @@ async def job_poll(context: ContextTypes.DEFAULT_TYPE) -> None:
     dist_nm = None
     if airport.get("lat") is not None:
         dist_nm = haversine_nm(telemetry.lat, telemetry.lon, airport["lat"], airport["lon"])
+    prev_fix = event.last_telemetry  # the fix before this one, for touchdown timing
     prev_divert_hits = event.last_telemetry.get("divert_hits") or 0
     # An aircraft still sitting at its origin is on the ground and far from
     # the destination — indistinguishable from a diversion unless we require
@@ -714,14 +787,34 @@ async def job_poll(context: ContextTypes.DEFAULT_TYPE) -> None:
         "divert_hits": prev_divert_hits + 1 if divert_candidate else 0,
     }
 
+    if (
+        event.type == EventType.ARRIVAL
+        and not telemetry.on_ground
+        and dist_nm is not None
+        and dist_nm <= WHEELS_ETA_MAX_DIST_NM
+    ):
+        elevation = await asyncio.to_thread(_field_elevation, event.target_airport)
+        wheels = _predict_touchdown(telemetry, dist_nm, elevation, now)
+        if wheels is not None:
+            event.last_telemetry["wheels_eta_at"] = wheels.isoformat()
+
     finished = False
     stamp = fmt_local(now)
     if event.type == EventType.ARRIVAL:
         near = dist_nm is not None and dist_nm <= LANDED_MAX_DIST_NM
         low = telemetry.on_ground or telemetry.alt_ft < LANDED_MAX_ALT_FT
         if near and low:
+            elevation = await asyncio.to_thread(_field_elevation, event.target_airport)
+            touchdown = _estimate_touchdown(telemetry, prev_fix, elevation, now)
             event.status = EventState.LANDED
-            event.status_note = stamp
+            event.status_note = fmt_local(touchdown)
+            event.last_telemetry["touchdown_at"] = touchdown.isoformat()
+            # FR24's trail knows wheels-down to the second — recorded beside
+            # our interpolated stamp (which stays the displayed one) so
+            # history can audit the estimator against ground truth.
+            fr24_touchdown = await asyncio.to_thread(adsb.fr24_touchdown_time, event.tail)
+            if fr24_touchdown is not None:
+                event.last_telemetry["touchdown_fr24_at"] = fr24_touchdown.isoformat()
             finished = True
         elif divert_candidate and prev_divert_hits + 1 >= DIVERT_CONFIRM_POLLS:
             where = await asyncio.to_thread(airport_db.nearest, telemetry.lat, telemetry.lon)
@@ -1189,14 +1282,22 @@ async def heal_unknown_metadata(config: Config) -> int:
     A tail added while the aircraft is parked has no FR24 schedule rows and no
     live transponder data, so it can land in the watchlist as "Unknown". Once
     the data exists, fill it in rather than leaving it wrong forever.
+
+    Tails watched from before /add seeded the dossier cache have no cached
+    type code either, so the digest showed no equipment label for them —
+    resolving them here backfills the cache the same way.
     """
+    cache = aircraft_db.load_cache()
     stale = [
         tail for tail, meta in config.watchlist.items()
-        if _is_missing(meta.get("airline")) or _is_missing(meta.get("model"))
+        if _is_missing(meta.get("airline"))
+        or _is_missing(meta.get("model"))
+        or not (cache.get(tail.upper()) or {}).get("type_code")
     ]
     healed = 0
     for tail in stale:
         info = await asyncio.to_thread(resolve_aircraft, tail)
+        aircraft_db.record_profile(tail, info)  # feeds the digest's type codes
         entry = config.watchlist[tail]
         changed = False
         for key in ("airline", "model", "livery", "thumbnail"):

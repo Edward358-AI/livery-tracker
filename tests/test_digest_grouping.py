@@ -80,8 +80,9 @@ def test_group_by_airport_sections_every_airport_with_all_traffic():
     # SFO carries an arrival and a departure; SJC likewise.
     assert "N265AK" in sfo and "N642FR" in sfo
     assert "N8658A" in sjc and "N642FR" in sjc
-    # The two-airport hop stays unmerged so it appears at both ends.
-    assert text.count("N642FR") == 2
+    # The two-airport hop stays unmerged so it appears at both ends
+    # (the link text counts rendered lines; hrefs also carry the tail).
+    assert text.count(">N642FR</a>") == 2
     # Header already names the airport, so lines omit the redundant suffix.
     assert "@ SFO" not in text and "@ SJC" not in text
 
@@ -133,7 +134,7 @@ def test_group_by_airline_nests_carriers_under_each_airport():
     assert subheaders_of(sfo) == ["🏢 <i><u>Alaska Airlines</u></i>", "🏢 <i><u>Frontier</u></i>"]
     assert subheaders_of(sjc) == ["🏢 <i><u>Frontier</u></i>", "🏢 <i><u>Southwest Airlines</u></i>"]
     # Per-airport views never merge: the hop shows at both ends.
-    assert text.count("N642FR") == 2
+    assert text.count(">N642FR</a>") == 2
 
 
 def test_group_by_airline_falls_back_for_unknown_tails():
@@ -152,7 +153,7 @@ def test_group_by_type_merges_and_splits_arrivals_departures():
         "🛬 <b>Arrivals</b>",
         "🛫 <b>Departures</b>",
     ]
-    assert "N642FR" in text and text.count("N642FR") == 1  # merged into one line
+    assert "N642FR" in text and text.count(">N642FR</a>") == 1  # merged into one line
     assert "@ SFO" in text  # airport shown inline in this mode
 
 

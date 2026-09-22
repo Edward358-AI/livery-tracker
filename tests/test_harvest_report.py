@@ -31,7 +31,7 @@ def test_each_new_leg_is_listed():
     text = _describe_new_legs(events)
     assert "N265AK" in text and "AS1234" in text and "SEA➔SFO" in text
     assert "N8658A" in text and "WN400" in text
-    assert '"Retro"' in text          # livery carried through
+    assert "<b>Retro</b>" in text     # livery carried through, leading the line
     assert "ETA" in text and "ETD" in text
 
 

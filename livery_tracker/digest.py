@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from datetime import datetime, timedelta
 
@@ -58,6 +59,25 @@ def _gate_suffix(event: FlightEvent) -> str:
     return f" · {label}" if label else ""
 
 
+def _wheels_note(event: FlightEvent) -> str:
+    """' · wheels ≈1:24 PM' for a live arrival close enough to project.
+
+    The mirrored ETA is the source's *gate* time; wheels-down runs ~10 min
+    earlier and is what a spotter plans around. ≈ marks a projection — ~ is
+    already taken for times adopted from the source's record.
+    """
+    raw = event.last_telemetry.get("wheels_eta_at")
+    if not raw:
+        return ""
+    try:
+        when = datetime.fromisoformat(raw)
+    except (TypeError, ValueError):
+        return ""
+    if when <= datetime.now().astimezone():
+        return ""  # projection already in the past — stale, hide it
+    return f" · wheels ≈{fmt_local(when)}"
+
+
 def _leg_detail(event: FlightEvent) -> str:
     """The status phrase for one leg ('ETA 3:45 PM PDT', '12,400 ft · ...', ...)."""
     when_label = "ETA" if event.type == EventType.ARRIVAL else "ETD"
@@ -72,7 +92,7 @@ def _leg_detail(event: FlightEvent) -> str:
             bits.append(f"{tele['dist_nm']:.0f} NM {'out' if event.type == EventType.ARRIVAL else 'away'}")
         # The expected time stays on the line even once telemetry is flowing:
         # "48 NM out" alone never says whether that is early, late, or on time.
-        detail = f"{when_label} {fmt_local(event.scheduled_time)}{_gate_suffix(event)} — "
+        detail = f"{when_label} {fmt_local(event.scheduled_time)}{_gate_suffix(event)}{_wheels_note(event)} — "
         detail += " · ".join(bits) if bits else "polling, no ADS-B contact yet"
         if event.status_note:
             detail += f" ({event.status_note})"
@@ -122,30 +142,62 @@ def _type_code(tail: str) -> str:
     return _TYPE_CODES.get(tail.upper(), "")
 
 
-def _tail_label(tail: str) -> str:
+FLIGHTAWARE_URL = "https://www.flightaware.com/live/flight/{ident}"
+
+# Every displayed time carries the same zone, so per-line zone labels are
+# noise — the footer stamps it once. Stored status notes embed formatted
+# times, so the zone is stripped at render rather than at the source.
+_TZ_IN_TIME = re.compile(r"(\b\d{1,2}:\d{2} [AP]M) [A-Z]{2,4}\b")
+
+
+def _strip_tz(text: str) -> str:
+    return _TZ_IN_TIME.sub(r"\1", text)
+
+
+def _tail_label(tail: str, leading: bool = False) -> str:
+    """FlightAware-linked registration plus type code.
+
+    Leading (no livery to headline) it carries the bold weight the livery
+    would have; trailing, it stays plain so the emphasis lands on the livery.
+    """
+    href = FLIGHTAWARE_URL.format(ident=tail.replace("-", ""))
+    link = f'<a href="{href}">{tail}</a>'
+    if leading:
+        link = f"<b>{link}</b>"
     code = _type_code(tail)
-    return f"<b>{tail}</b> ({code})" if code else f"<b>{tail}</b>"
+    return f"{link} ({code})" if code else link
 
 
 def format_leg(event: FlightEvent, show_airport: bool = True) -> str:
     """One leg. `show_airport` is off when the section header already names it."""
-    livery = f' "{event.livery}"' if event.livery else ""
     flight = f" {event.flight_number}" if event.flight_number else ""
     route = f"{event.route_origin}➔{event.route_destination}{flight}"
     emoji = STATE_EMOJI.get(event.status, "•")
     where = f" @ {event.target_airport}" if show_airport else ""
-    return f"{emoji} {_tail_label(event.tail)}{livery} — {route}{where}, {_leg_detail(event)}"
+    detail = _strip_tz(_leg_detail(event))
+    # The livery is why the aircraft is watched, so it leads; the identity
+    # (linked tail + type) trails as a natural tap target.
+    if event.livery:
+        head = f"<b>{event.livery}</b>"
+        identity = f" · {_tail_label(event.tail)}"
+    else:
+        head = _tail_label(event.tail, leading=True)
+        identity = ""
+    return f"{emoji} {head} — {route}{where}, {detail}{identity}"
 
 
 def _merged_line(dep: FlightEvent, arr: FlightEvent) -> str:
     """One line for a flight between two watched airports (two legs under the hood)."""
-    livery = f' "{dep.livery or arr.livery}"' if (dep.livery or arr.livery) else ""
+    livery = dep.livery or arr.livery
     flight = f" {dep.flight_number}" if dep.flight_number else ""
     route = f"{dep.route_origin}➔{dep.route_destination}{flight}"
     # Show the emoji of the phase currently in progress; once airborne, the arrival's.
     current = dep if not dep.status.terminal else arr
     emoji = STATE_EMOJI.get(current.status, "•")
-    return f"{emoji} {_tail_label(dep.tail)}{livery} — {route}, {_leg_detail(dep)} → {_leg_detail(arr)}"
+    detail = _strip_tz(f"{_leg_detail(dep)} → {_leg_detail(arr)}")
+    if livery:
+        return f"{emoji} <b>{livery}</b> — {route}, {detail} · {_tail_label(dep.tail)}"
+    return f"{emoji} {_tail_label(dep.tail, leading=True)} — {route}, {detail}"
 
 
 MAX_PAIR_GAP = timedelta(hours=20)  # dep and arr legs of one flight are at most this far apart

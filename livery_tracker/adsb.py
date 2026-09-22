@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from .throttle import MISS, TTLCache
 from .web import get_json
@@ -118,35 +119,49 @@ FR24_CLICK_URL = "https://data-live.flightradar24.com/clickhandler/"
 FR24_MAX_STALENESS_S = 600
 
 
-def _fr24_telemetry(reg: str) -> Telemetry | None:
-    """FR24 live position for a registration (satellite-backed coverage)."""
+def _fr24_live_payload(reg: str) -> dict | None:
+    """Search FR24 for a registration's live flight and fetch its payload.
+
+    The clickhandler body (with the search result's detail stashed under
+    `_search_detail`) carries the current position and the full timestamped
+    trail of the flight.
+    """
     from curl_cffi import requests as curl_requests
 
+    resp = curl_requests.get(
+        FR24_SEARCH_URL,
+        params={"query": reg, "limit": 10},
+        impersonate="chrome",
+        timeout=20,
+    )
+    if resp.status_code != 200:
+        return None
+    live = [
+        r for r in (resp.json().get("results") or [])
+        if r.get("type") == "live"
+        and ((r.get("detail") or {}).get("reg") or "").upper() == reg.upper()
+    ]
+    if not live:
+        return None
+    resp = curl_requests.get(
+        FR24_CLICK_URL,
+        params={"version": "1.5", "flight": live[0]["id"]},
+        impersonate="chrome",
+        timeout=20,
+    )
+    if resp.status_code != 200:
+        return None
+    body = resp.json()
+    body["_search_detail"] = live[0].get("detail") or {}
+    return body
+
+
+def _fr24_telemetry(reg: str) -> Telemetry | None:
+    """FR24 live position for a registration (satellite-backed coverage)."""
     try:
-        resp = curl_requests.get(
-            FR24_SEARCH_URL,
-            params={"query": reg, "limit": 10},
-            impersonate="chrome",
-            timeout=20,
-        )
-        if resp.status_code != 200:
+        body = _fr24_live_payload(reg)
+        if not body:
             return None
-        live = [
-            r for r in (resp.json().get("results") or [])
-            if r.get("type") == "live"
-            and ((r.get("detail") or {}).get("reg") or "").upper() == reg.upper()
-        ]
-        if not live:
-            return None
-        resp = curl_requests.get(
-            FR24_CLICK_URL,
-            params={"version": "1.5", "flight": live[0]["id"]},
-            impersonate="chrome",
-            timeout=20,
-        )
-        if resp.status_code != 200:
-            return None
-        body = resp.json()
         trail = body.get("trail") or []
         if not trail:
             return None
@@ -160,7 +175,7 @@ def _fr24_telemetry(reg: str) -> Telemetry | None:
             dt = (point.get("ts") or 0) - (prev.get("ts") or 0)
             if dt > 0:
                 rate = (alt - (prev.get("alt") or 0)) / dt * 60  # ft/min
-        callsign = ((live[0].get("detail") or {}).get("callsign")) or ""
+        callsign = body["_search_detail"].get("callsign") or ""
         return Telemetry(
             lat=float(point["lat"]),
             lon=float(point["lng"]),
@@ -173,4 +188,52 @@ def _fr24_telemetry(reg: str) -> Telemetry | None:
         )
     except Exception as exc:  # noqa: BLE001
         log.debug("FR24 telemetry fallback failed for %s: %s", reg, exc)
+        return None
+
+
+# A touchdown read from the trail is only trusted while it's fresh — an old
+# ground run would be a previous flight, or a payload served from deep cache.
+FR24_TOUCHDOWN_MAX_AGE_S = 3600
+
+
+def _trail_touchdown(trail: list[dict], now_ts: float | None = None) -> datetime | None:
+    """The first ground fix of the latest landing in a trail (newest first).
+
+    The trail leads with ground points once the aircraft has landed; the
+    last of that leading run — the fix right after the airborne ones — is
+    the touchdown, timestamped to FR24's own resolution (seconds).
+    """
+    now_ts = time.time() if now_ts is None else now_ts
+    ground_run: list[float] = []
+    for point in trail:
+        ts = point.get("ts")
+        if ts is None:
+            continue
+        if (point.get("alt") or 0) <= 0:
+            ground_run.append(ts)
+            continue
+        # First airborne point: the run above it (if any) is the landing.
+        if not ground_run:
+            return None  # still flying — nothing has touched down yet
+        touchdown_ts = ground_run[-1]
+        if now_ts - touchdown_ts > FR24_TOUCHDOWN_MAX_AGE_S:
+            return None
+        return datetime.fromtimestamp(touchdown_ts, tz=timezone.utc)
+    return None  # no airborne point at all: a parked trail proves nothing
+
+
+def fr24_touchdown_time(reg: str) -> datetime | None:
+    """Actual wheels-down time from FR24's track, to the second.
+
+    Fetched once, right after a landing concludes, while the flight is still
+    on FR24's live list — the interpolated stamp stays the displayed truth,
+    and this rides along in history for auditing it.
+    """
+    try:
+        body = _fr24_live_payload(reg)
+        if not body:
+            return None
+        return _trail_touchdown(body.get("trail") or [])
+    except Exception as exc:  # noqa: BLE001
+        log.debug("FR24 touchdown lookup failed for %s: %s", reg, exc)
         return None
