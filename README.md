@@ -299,7 +299,10 @@ flakiest datum in aviation, so nothing in the tracking logic depends on them. If
 past what a single Telegram message can hold (~4096 characters, roughly 45
 legs), the digest automatically continues into additional messages — each still
 edited in place, so it never stops updating no matter how many aircraft you
-watch. Example (the default airport-first layout):
+watch. When the day's content crosses a message boundary, only the trailing
+message is appended or removed — the first message stays anchored in the chat
+all day, and the only full re-post is the morning rollover. Example (the
+default airport-first layout):
 
 ```
 ✈️ LIVERY DIGEST — Sun Jul 26

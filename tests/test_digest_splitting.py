@@ -144,20 +144,85 @@ def test_multi_part_digest_is_edited_in_place_on_later_refreshes():
     assert bot.deleted == []
 
 
-def test_changing_part_count_rebuilds_the_digest():
+def test_growing_digest_appends_at_the_tail_without_deleting():
+    """More parts means new tail messages — the head message is never
+    deleted and resent, so the digest stays anchored in the chat."""
     bot = FakeBot()
     config = make_config(120)
-    small = store_with(6)
-    manager = DigestManager(bot, chat_id=1, store=small, config=config)
+    manager = DigestManager(bot, chat_id=1, store=store_with(6), config=config)
     asyncio.run(manager.refresh())
     assert len(bot.sent) == 1
     first_id = 501
 
     # The watchlist balloons: one message can no longer hold the digest.
     manager.store = store_with(120)
+    parts = len(render_digest_parts(manager.store, config))
+    assert parts > 1
     asyncio.run(manager.refresh())
-    assert first_id in bot.deleted, "the stale single message should be removed"
-    assert len(bot.sent) > 1
+
+    assert bot.deleted == [], "growth must not delete anything"
+    assert bot.edited and bot.edited[0][0] == first_id  # head edited in place
+    assert len(bot.sent) == parts                       # 1 original + the new tail
+    state = json.loads((data_dir() / "digest_state.json").read_text(encoding="utf-8"))
+    assert state["message_ids"][0] == first_id
+    assert len(state["message_ids"]) == parts
+
+
+def test_shrinking_digest_trims_only_the_tail():
+    bot = FakeBot()
+    config = make_config(120)
+    manager = DigestManager(bot, chat_id=1, store=store_with(120), config=config)
+    asyncio.run(manager.refresh())
+    ids = json.loads(
+        (data_dir() / "digest_state.json").read_text(encoding="utf-8")
+    )["message_ids"]
+    assert len(ids) > 1
+
+    # Legs conclude and purge until one message holds the digest again.
+    # (A fresh store_with() would reload the persisted 120 from disk.)
+    manager.store.remove_where(lambda ev: int(ev.id[3:]) >= 6)
+    asyncio.run(manager.refresh())
+
+    assert bot.deleted == ids[1:], "only the tail messages go"
+    assert any(m == ids[0] for m, _ in bot.edited), "head edited, not resent"
+    state = json.loads((data_dir() / "digest_state.json").read_text(encoding="utf-8"))
+    assert state["message_ids"] == [ids[0]]
+
+
+def test_concurrent_refreshes_send_one_digest_not_two():
+    """The 06:00 double-post: two jobs refreshing at once both saw stale
+    state and each sent a full set. refresh() is serialized now."""
+    class YieldingBot(FakeBot):
+        async def send_message(self, chat_id, text, **kwargs):
+            await asyncio.sleep(0)   # force an interleave point mid-send
+            return await super().send_message(chat_id, text, **kwargs)
+
+    bot = YieldingBot()
+    manager = DigestManager(bot, chat_id=1, store=store_with(6), config=make_config(6))
+
+    async def both():
+        await asyncio.gather(manager.refresh(), manager.refresh())
+
+    asyncio.run(both())
+    assert len(bot.sent) == 1, "the second refresh must edit, not re-send"
+    assert len(bot.edited) == 1
+
+
+def test_hand_deleted_message_is_replaced_on_the_next_refresh():
+    class GoneBot(FakeBot):
+        async def edit_message_text(self, chat_id, message_id, text, **kwargs):
+            from telegram.error import BadRequest
+            raise BadRequest("Message to edit not found")
+
+    bot = GoneBot()
+    manager = DigestManager(bot, chat_id=1, store=store_with(6), config=make_config(6))
+    asyncio.run(manager.refresh())
+    assert len(bot.sent) == 1
+
+    asyncio.run(manager.refresh())   # the user cleared the chat by hand
+    assert len(bot.sent) == 2, "vanished digest is re-sent"
+    state = json.loads((data_dir() / "digest_state.json").read_text(encoding="utf-8"))
+    assert state["message_ids"] == [502]
 
 
 def test_legacy_single_id_state_is_understood():

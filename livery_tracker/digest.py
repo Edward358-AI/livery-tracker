@@ -6,6 +6,7 @@ chat stays free of flight traffic entirely.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -429,6 +430,10 @@ class DigestManager:
         self.config = config
         self.owns_bot = owns_bot  # separate digest bot we must initialize/shutdown
         self._ready = not owns_bot
+        # Every poll, sync and harvest calls refresh(), and a refresh awaits
+        # Telegram mid-flight — unserialized, two of them both read the same
+        # state, both resend, and the loser's messages orphan in the chat.
+        self._refresh_lock = asyncio.Lock()
 
     def _state_path(self):
         return data_dir() / "digest_state.json"
@@ -494,7 +499,7 @@ class DigestManager:
             state["stale_ids"] = stale
         atomic_write_json(self._state_path(), state)
 
-    async def _send_all(self, parts: list[str], today: str, stale_ids: list[int]) -> None:
+    async def _send_parts(self, parts: list[str]) -> list[int]:
         sent: list[int] = []
         try:
             for text in parts:
@@ -507,17 +512,27 @@ class DigestManager:
                 sent.append(msg.message_id)
         except Exception as exc:  # noqa: BLE001
             log.error("Digest send failed: %s", exc)
+        return sent
+
+    async def _send_all(self, parts: list[str], today: str, stale_ids: list[int]) -> None:
+        sent = await self._send_parts(parts)
         if sent:
             self._write_state(today, sent, stale_ids)
 
     async def refresh(self) -> None:
         """Re-render and push the digest.
 
-        Normally this is a single message edited in place. Once a watchlist
-        grows past what fits in one Telegram message the digest is split, and
-        the parts are edited in place just the same — only a change in the
-        *number* of parts forces a resend.
+        The digest is edited in place, however many messages it spans. When
+        the part count changes it grows or shrinks *at the tail* — an extra
+        message is appended, or a trailing one deleted — so the head message
+        stays anchored in the chat all day. The only full resend is the
+        morning rollover. Serialized: concurrent refreshes used to double-post
+        the whole digest.
         """
+        async with self._refresh_lock:
+            await self._refresh_locked()
+
+    async def _refresh_locked(self) -> None:
         try:
             await self.ensure_ready()
         except Exception as exc:  # noqa: BLE001
@@ -541,27 +556,43 @@ class DigestManager:
             stored = []
 
         if state.get("date") == today and stored:
-            if len(stored) == len(parts):
-                for message_id, text in zip(stored, parts):
-                    try:
-                        await self.bot.edit_message_text(
-                            chat_id=self.chat_id,
-                            message_id=message_id,
-                            text=text,
-                            parse_mode=ParseMode.HTML,
-                            disable_web_page_preview=True,
-                        )
-                    except BadRequest as exc:
-                        if "not modified" not in str(exc).lower():
-                            log.warning("Digest edit failed: %s", exc)
-                    except Exception as exc:  # noqa: BLE001
+            if len(stored) > len(parts):
+                log.info("Digest shrank (%d -> %d parts) — trimming the tail",
+                         len(stored), len(parts))
+                stale += await self._delete(stored[len(parts):])
+            kept = stored[: len(parts)]
+            alive: list[int] = []
+            vanished = False
+            for message_id, text in zip(kept, parts):
+                try:
+                    await self.bot.edit_message_text(
+                        chat_id=self.chat_id,
+                        message_id=message_id,
+                        text=text,
+                        parse_mode=ParseMode.HTML,
+                        disable_web_page_preview=True,
+                    )
+                except BadRequest as exc:
+                    lowered = str(exc).lower()
+                    if "not found" in lowered:
+                        # Deleted by hand — drop the id. Appending now would
+                        # duplicate content next to the survivors, so let the
+                        # next refresh redistribute and top up instead.
+                        vanished = True
+                        continue
+                    if "not modified" not in lowered:
                         log.warning("Digest edit failed: %s", exc)
-                if stale != had_stale:
-                    self._write_state(today, stored, stale)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("Digest edit failed: %s", exc)
+                alive.append(message_id)
+            if alive and not vanished and len(parts) > len(alive):
+                log.info("Digest grew (%d -> %d parts) — appending",
+                         len(alive), len(parts))
+                alive += await self._send_parts(parts[len(alive):])
+            if alive:
+                if alive != stored or stale != had_stale:
+                    self._write_state(today, alive, stale)
                 return
-            # The digest grew or shrank by a whole message — rebuild it.
-            log.info("Digest split changed (%d -> %d parts) — resending",
-                     len(stored), len(parts))
-            stale += await self._delete(stored)
+            # Every message vanished (chat cleared by hand) — start fresh.
 
         await self._send_all(parts, today, stale)
